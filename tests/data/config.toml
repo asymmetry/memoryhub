@@ -1,0 +1,22 @@
+[server]
+host = "127.0.0.1"
+port = 9090
+
+[memory]
+memory_dir = "./test_store"
+db_path = ":memory:"
+chunk_size = 400
+chunk_overlap = 80
+temporal_decay_days = 30
+hybrid_weight = 0.5
+
+[llm]
+provider = "deepseek"
+api_key_env = "DEEPSEEK_API_KEY"
+model = "deepseek-chat"
+embedding_model = "deepseek-embedding"
+
+[agent]
+enabled = false
+interval_secs = 60
+similarity_threshold = 0.75

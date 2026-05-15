@@ -6,19 +6,6 @@ The `Manager` actor is the top-level supervisor for ClawChorus. It owns the thre
 
 This iteration is **log-only**: there is no restart logic. Any child death tears the whole process down. Operators restart the process.
 
-## Architecture
-
-```
-        main.rs
-           |
-        Manager
-        /  |  \
-   Llm   Memory   Http
-   Service Manager Server
-```
-
-`main.rs` spawns exactly one actor: the `Manager`. The `Manager` constructs and owns its three children — they are not spawned by `main` and passed in.
-
 ### Construction
 
 `Manager::new(config, shutdown_tx)`:
@@ -45,12 +32,12 @@ Same pattern for `MemoryManager` and `HttpServer`. Once subscribed, the Manager'
 
 Each of the three `Handler<SupervisionEvent<X>>` impls dispatches to a common helper, distinguished only by the static child-name string used in logs.
 
-| Event variant            | Action                                                                                              |
-| ------------------------ | --------------------------------------------------------------------------------------------------- |
-| `Warn(_, err)`           | `warn!` with child name and error display. Continue.                                                |
-| `State(_, state)`        | `debug!` with state. Continue.                                                                      |
-| `Terminated(_, err)`     | `error!` with child name and optional error. Initiate shutdown.                                     |
-| `Panicked(_, info)`      | `error!` with child name and panic info. Initiate shutdown.                                         |
+| Event variant        | Action                                                          |
+| -------------------- | --------------------------------------------------------------- |
+| `Warn(_, err)`       | `warn!` with child name and error display. Continue.            |
+| `State(_, state)`    | `debug!` with state. Continue.                                  |
+| `Terminated(_, err)` | `error!` with child name and optional error. Initiate shutdown. |
+| `Panicked(_, info)`  | `error!` with child name and panic info. Initiate shutdown.     |
 
 ### Initiate shutdown
 

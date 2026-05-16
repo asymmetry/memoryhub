@@ -2,120 +2,47 @@
 
 ## Overview
 
-The `Manager` actor is the top-level supervisor for ClawChorus. It owns the three sub-system actors (`LlmService`, `MemoryManager`, `HttpServer`), subscribes to their supervision events, logs lifecycle activity, and initiates a clean shutdown when any child terminates or panics. It runs no business logic.
+The `Manager` actor is ClawChorus's top-level supervisor. It owns the three sub-system actors — `LlmService`, `MemoryManager`, and `HttpServer` — supervises them, and tears the whole system down cleanly when any of them fails. It runs no business logic and receives no external traffic.
 
-This iteration is **log-only**: there is no restart logic. Any child death tears the whole process down. Operators restart the process.
+This iteration is **log-only**: there is no restart logic. Any child death stops the process; an operator restarts it.
 
-### Construction
+## Lifecycle
 
-`Manager::new(config, shutdown_tx)`:
+`Manager::new` just holds the config. When the Manager actor starts, it spawns the three children in dependency order — `LlmService`, then `MemoryManager` (needs the LLM), then `HttpServer` (needs the Memory Manager). Each child is spawned with the Manager already registered as its supervisor, so no child can fail before supervision is in place. If any child fails to spawn, the Manager fails to start.
 
-1. Builds the LLM provider from `config.llm` and spawns `LlmService` → captures `Address<LlmService>` + `JoinHandle`.
-2. Spawns `MemoryManager` with the LLM address → captures `Address<MemoryManager>` + `JoinHandle`.
-3. Spawns `HttpServer` with the `MemoryManager` address and `config.server` → captures `Address<HttpServer>` + `JoinHandle`.
-4. Stores the `shutdown_tx: oneshot::Sender<()>` for use during fault-driven shutdown.
+## Supervision
 
-The Manager exposes no message handlers beyond the three `Handler<SupervisionEvent<_>>` impls described below. It receives no external traffic.
+The Manager handles supervision events from each child:
 
-### Supervisor wiring
+- **Warning** — logged; the child continues.
+- **Terminated or panicked** — logged; the Manager stops itself, which triggers shutdown.
+- Other lifecycle events are ignored.
 
-In `post_start`, the Manager subscribes itself as supervisor for each child:
+## Shutdown
 
-```rust
-let recipient: Recipient<SupervisionEvent<LlmService>> = ctx.address().clone().into();
-llm_addr.send(Supervisor::Set(recipient)).await?;
-```
+Shutdown has two triggers, both converging on the same teardown:
 
-Same pattern for `MemoryManager` and `HttpServer`. Once subscribed, the Manager's mailbox receives `SupervisionEvent<X>` messages for each child.
+- **Operator (ctrl-c)** — `main` signals the Manager to stop.
+- **Child failure** — the Manager stops itself on a terminated/panicked event.
 
-## Supervision Events
-
-Each of the three `Handler<SupervisionEvent<X>>` impls dispatches to a common helper, distinguished only by the static child-name string used in logs.
-
-| Event variant        | Action                                                          |
-| -------------------- | --------------------------------------------------------------- |
-| `Warn(_, err)`       | `warn!` with child name and error display. Continue.            |
-| `State(_, state)`    | `debug!` with state. Continue.                                  |
-| `Terminated(_, err)` | `error!` with child name and optional error. Initiate shutdown. |
-| `Panicked(_, info)`  | `error!` with child name and panic info. Initiate shutdown.     |
-
-### Initiate shutdown
-
-A single `initiate_shutdown(&mut self, reason: &str)` method:
-
-1. If `self.shutting_down` is `true`, log and return (idempotent).
-2. Set `self.shutting_down = true`.
-3. Send `Signal::Terminate` to each surviving child via `do_send` (fire-and-forget; failures are logged but do not block).
-4. Take `self.shutdown_tx` (it is `Option<oneshot::Sender<()>>`); send `()`. Ignore send errors (`main` may have already exited via ctrl-c).
-5. Stop the Manager itself by sending `Signal::Terminate` to `ctx.address()`.
-
-`post_stop` joins each child's `JoinHandle` with a per-handle abort fallback (mirrors the existing `MemoryManager::post_stop` pattern). The order is reverse of startup: `HttpServer` → `MemoryManager` → `LlmService`.
-
-## main.rs
-
-```rust
-let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
-let manager = Manager::new(config, shutdown_tx)?;
-let (_manager_addr, manager_handle) = manager.start("manager")?;
-
-tokio::select! {
-    _ = tokio::signal::ctrl_c() => info!("ctrl-c received"),
-    _ = shutdown_rx => warn!("Manager initiated shutdown after child failure"),
-}
-
-// Manager's own post_stop drains children. Cap wait time so a stuck child
-// can't block process exit indefinitely.
-let _ = tokio::time::timeout(Duration::from_secs(5), manager_handle).await;
-```
-
-On ctrl-c, `main` returns from `select!` and drops `_manager_addr`; the runtime delivers `Signal::Terminate` to the Manager, which drains children in `post_stop`. On fault-driven shutdown, the Manager has already started teardown before signalling `shutdown_rx`.
+Either way, the Manager terminates its three children in reverse startup order (`HttpServer` → `MemoryManager` → `LlmService`), waiting for each to stop. A child that already died is handled harmlessly. `main` waits for the Manager to finish, bounded by a timeout so a stuck child cannot block process exit.
 
 ## Error Type
 
-`ManagerError` added to `src/error.rs` alongside `ConfigError`:
-
-```rust
-pub enum ManagerError {
-    Llm(#[from] LlmError),
-    Memory(#[from] MemoryError),
-    Http(#[from] HttpServerError),
-    Actor(String),
-}
-```
-
-`Actor::Error = ManagerError`. `Manager::new` returns `Result<Self, ManagerError>` so child spawn failures abort startup.
-
-## Module Layout
-
-```
-src/
-  manager.rs           // Manager actor (~150 LOC)
-  error.rs             // add ManagerError variant
-  lib.rs               // add `pub mod manager;`
-  main.rs              // simplified: only Manager + shutdown_rx
-```
-
-No new submodule directory — `manager.rs` stays a single file. Existing `MemoryManager` keeps its current name (the new actor is unambiguously `Manager` at the crate root).
+`ManagerError` wraps the child sub-system errors (`LlmError`, `MemoryError`, `HttpServerError`) plus an actor-messaging variant. Child spawn failures surface through it and abort startup.
 
 ## Testing
 
-**Unit (in `src/manager.rs`):**
+Integration tests in `tests/manager.rs` cover the two paths:
 
-- `dispatch_event_shutdown_is_idempotent` — invoke the shutdown helper twice; assert `shutdown_tx` is taken only once and no panic.
+- **Clean shutdown** — start the Manager, signal it to stop, expect it to stop within a timeout.
+- **Fault shutdown** — make a child fail, expect the Manager to detect it and stop itself within a timeout.
 
-**Integration (`tests/manager_integration.rs`):**
-
-- `manager_starts_and_stops_cleanly` — construct with `MockProvider` (use a free port: `server.port = 0`), start, signal-terminate the Manager, assert `manager_handle.await` completes within a 5s timeout.
-- `manager_initiates_shutdown_when_child_dies` — construct, send `Signal::Terminate` to one child via a `pub(crate)` test-only accessor on the Manager, assert `shutdown_rx` fires within a 2s timeout.
-
-The third "end-to-end through HTTP" check is already covered by `tests/http_integration.rs` plus the existing `MemoryManager` tests; adding it at the Manager level would duplicate without raising confidence.
-
-Out of scope: restart logic, exponential backoff, partial degraded modes.
+Tests run against an in-memory mock LLM provider, gated behind a hidden Cargo feature so it never ships in release builds.
 
 ## Out of Scope (Future Work)
 
-- Restart-on-crash for any child
-- Backoff or restart-attempt caps
-- Selective shutdown (HTTP-only restart)
-- Health endpoints reporting child status
+- Restart-on-crash, backoff, restart-attempt caps
+- Selective shutdown (e.g. restarting only HTTP)
+- Health reporting of child status
 - Graceful drain of in-flight requests before shutdown

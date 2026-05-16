@@ -16,7 +16,7 @@ use tracing::{info, trace};
 
 use crate::config::ServerConfig;
 use crate::http::router::build_router;
-use crate::memory::manager::MemoryManager;
+use crate::memory::MemoryManager;
 
 #[derive(Debug, Error)]
 pub enum HttpServerError {

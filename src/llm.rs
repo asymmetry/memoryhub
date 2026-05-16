@@ -2,22 +2,23 @@
 //!
 //! Sibling of Memory Manager, supervised by the top-level Manager.
 
-pub mod config;
-pub mod error;
-pub mod provider;
-pub mod session;
-
 use std::sync::Arc;
 use std::time::Duration;
 
-use acktor::message::FutureMessageResult;
-use acktor::{Actor, Address, Context, Handler, Message};
+use acktor::{Actor, Address, Context, Handler, Message, message::FutureMessageResult};
 use tracing::trace;
 
 use crate::llm::config::LlmConfig;
-pub use crate::llm::error::LlmError;
+
 use crate::llm::provider::Provider;
 use crate::llm::session::Session;
+
+mod error;
+pub use crate::llm::error::LlmError;
+
+pub mod config;
+pub mod provider;
+pub mod session;
 
 /// A single embedding vector.
 #[derive(Debug, Clone)]

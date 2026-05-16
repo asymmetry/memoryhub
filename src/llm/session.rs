@@ -5,14 +5,16 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use acktor::cron::{CronActor, CronContext};
-use acktor::message::FutureMessageResult;
-use acktor::{Actor, ActorContext, Handler, Message, Signal};
+use acktor::{
+    Actor, ActorContext, Handler, Message, Signal,
+    cron::{CronActor, CronContext},
+    message::FutureMessageResult,
+};
 use tokio::time::Instant;
 use tracing::{trace, warn};
 
-use crate::llm::LlmError;
-use crate::llm::provider::{ChatMessage, Provider, Role, retry};
+use super::error::LlmError;
+use super::provider::{ChatMessage, Provider, Role, retry};
 
 /// Send a user-authored message into the session. Returns the assistant reply.
 #[derive(Debug, Clone, Message)]

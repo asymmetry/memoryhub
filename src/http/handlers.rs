@@ -9,7 +9,7 @@ use crate::http::dto::{
     WriteRequest,
 };
 use crate::http::error::HttpError;
-use crate::memory::manager::MemoryManager;
+use crate::memory::MemoryManager;
 use crate::memory::messages::{FileOpDelete, FileOpRead, FileOpWrite, Search};
 
 pub async fn health() -> Json<HealthResponse> {

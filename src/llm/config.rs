@@ -30,15 +30,18 @@ pub struct LlmConfig {
     pub base_url: String,
 }
 
-fn default_session_idle_timeout_secs() -> u64 {
+const fn default_session_idle_timeout_secs() -> u64 {
     600
 }
-fn default_max_retries() -> u32 {
+
+const fn default_max_retries() -> u32 {
     3
 }
-fn default_request_timeout_secs() -> u64 {
+
+const fn default_request_timeout_secs() -> u64 {
     30
 }
+
 fn default_base_url() -> String {
     "https://api.deepseek.com".to_string()
 }

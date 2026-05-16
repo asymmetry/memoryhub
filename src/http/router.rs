@@ -6,7 +6,7 @@ use axum::routing::{get, post};
 use tower_http::trace::TraceLayer;
 
 use crate::http::handlers::{delete, health, read, search, write};
-use crate::memory::manager::MemoryManager;
+use crate::memory::MemoryManager;
 
 pub fn build_router(mm: Address<MemoryManager>) -> Router {
     Router::new()

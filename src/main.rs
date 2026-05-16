@@ -1,8 +1,7 @@
 use std::time::Duration;
 
-use acktor::{Actor, Signal};
+use acktor::{Actor, ErrorReport, Signal};
 use anyhow::Result;
-use tokio::sync::oneshot;
 use tracing::{info, warn};
 
 use clawchorus::{config, manager::Manager};
@@ -15,39 +14,35 @@ async fn main() -> Result<()> {
 
     let config = config::Config::load()?;
     info!(
-        host = %config.server.host,
-        port = config.server.port,
-        "ClawChorus starting"
+        "ClawChorus starting on {}:{}",
+        config.server.host, config.server.port
     );
     info!(
-        provider = %config.llm.provider,
-        model = %config.llm.model,
-        "LLM configuration"
+        "Using LLM provider '{}' with model '{}'",
+        config.llm.provider, config.llm.model
     );
 
-    let (shutdown_tx, shutdown_rx) = oneshot::channel();
-    let manager = Manager::new(config, shutdown_tx)?;
-    let (manager_addr, manager_handle) = manager.start("manager")?;
+    let manager = Manager::new(config);
+    let (manager_addr, mut manager_handle) = manager.start("mgr")?;
 
     tokio::select! {
         _ = tokio::signal::ctrl_c() => {
-            info!("ctrl-c received, shutting down");
-            if let Err(e) = manager_addr.do_send(Signal::Terminate).await {
-                warn!("Could not signal Manager: {e}");
+            info!("Ctrl-c received, stopping ClawChorus...");
+
+            if let Err(e) = manager_addr.do_send(Signal::Stop).await {
+                warn!("Could not signal Manager: {}", e.report());
             }
+
+            tokio::time::timeout(Duration::from_secs(5), manager_handle).await??;
+
+            info!("ClawChorus stopped");
+
+            Ok(())
         }
-        _ = shutdown_rx => {
-            warn!("Manager initiated shutdown after child failure");
-            // Manager has already begun teardown; sending Terminate again is harmless.
-            let _ = manager_addr.do_send(Signal::Terminate).await;
+        res = &mut manager_handle => {
+            warn!("ClawChorus stopped unexpectedly");
+
+            Ok(res?)
         }
     }
-
-    match tokio::time::timeout(Duration::from_secs(5), manager_handle).await {
-        Ok(Ok(_)) => info!("Manager stopped cleanly"),
-        Ok(Err(e)) => warn!("Manager join error: {e}"),
-        Err(_) => warn!("Manager did not stop within 5s; exiting anyway"),
-    }
-
-    Ok(())
 }

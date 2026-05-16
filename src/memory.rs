@@ -3,21 +3,23 @@
 //! Defines the core memory representations: [`RawMemory`], [`SynthesizedMemory`],
 //! [`MemoryEntry`], and the actor-based Memory Manager sub-system.
 
+use chrono::Utc;
+use serde::{Deserialize, Serialize};
+use uuid::Uuid;
+
 pub mod chunking;
 pub mod config;
 pub mod error;
 pub mod file_op;
 pub mod index;
-pub mod manager;
 pub mod messages;
 mod path;
 pub mod search_op;
 pub mod storage;
 pub mod synthesizer;
 
-use chrono::Utc;
-use serde::{Deserialize, Serialize};
-use uuid::Uuid;
+mod manager;
+pub use manager::MemoryManager;
 
 /// The type of a memory file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

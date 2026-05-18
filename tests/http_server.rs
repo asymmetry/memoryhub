@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use acktor::{Actor, Address};
+use acktor::{Actor, Address, Signal};
 use axum::{
     body::{Body, to_bytes},
     http::{Request, StatusCode},
@@ -8,9 +8,10 @@ use axum::{
 use tower::ServiceExt;
 
 use clawchorus::{
-    http::router::build_router,
+    config::ServerConfig,
+    http::{HttpServer, HttpServerState, build_router},
+    llm::{LlmService, provider::mock::MockProvider},
     memory::{MemoryManager, config::MemoryConfig},
-    {llm::LlmService, llm::provider::mock::MockProvider},
 };
 
 fn test_config(dir: &std::path::Path) -> MemoryConfig {
@@ -39,10 +40,28 @@ async fn body_string(resp: axum::response::Response) -> (StatusCode, String) {
 }
 
 #[tokio::test]
+async fn http_server_starts_and_stops() {
+    let dir = tempfile::tempdir().unwrap();
+    let mm = spawn_memory_manager(dir.path()).await;
+
+    // Pick an ephemeral port by binding 0.
+    let cfg = ServerConfig {
+        host: "127.0.0.1".to_string(),
+        port: 0,
+    };
+    let server = HttpServer::new(cfg, mm);
+    let (server_addr, server_handle) = server.start("http-server").unwrap();
+
+    // Stop the actor cleanly.
+    server_addr.do_send(Signal::Terminate).await.unwrap();
+    let _ = server_handle.await;
+}
+
+#[tokio::test]
 async fn health_returns_ok() {
     let dir = tempfile::tempdir().unwrap();
     let mm = spawn_memory_manager(dir.path()).await;
-    let app = build_router(mm);
+    let app = build_router(HttpServerState::new(mm));
 
     let req = Request::builder()
         .uri("/health")
@@ -58,7 +77,7 @@ async fn health_returns_ok() {
 async fn write_then_read_then_delete_then_read_404() {
     let dir = tempfile::tempdir().unwrap();
     let mm = spawn_memory_manager(dir.path()).await;
-    let app = build_router(mm);
+    let app = build_router(HttpServerState::new(mm));
 
     let agent_id = "550e8400-e29b-41d4-a716-446655440000";
 
@@ -143,7 +162,7 @@ async fn write_then_read_then_delete_then_read_404() {
 async fn search_after_write_returns_results() {
     let dir = tempfile::tempdir().unwrap();
     let mm = spawn_memory_manager(dir.path()).await;
-    let app = build_router(mm);
+    let app = build_router(HttpServerState::new(mm));
 
     let agent_id = "550e8400-e29b-41d4-a716-446655440000";
 
@@ -187,7 +206,7 @@ async fn search_after_write_returns_results() {
 async fn bad_json_returns_400() {
     let dir = tempfile::tempdir().unwrap();
     let mm = spawn_memory_manager(dir.path()).await;
-    let app = build_router(mm);
+    let app = build_router(HttpServerState::new(mm));
 
     let req = Request::builder()
         .method("POST")

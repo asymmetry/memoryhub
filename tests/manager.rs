@@ -1,8 +1,10 @@
 use std::time::Duration;
 
 use acktor::{Actor, Signal};
-use clawchorus::config::{Config, LlmConfig, MemoryConfig, ServerConfig};
-use clawchorus::manager::Manager;
+use clawchorus::{
+    ClawChorus,
+    config::{Config, LlmConfig, MemoryConfig, ServerConfig},
+};
 
 /// A config that builds the mock LLM provider (via the `_test` feature, which
 /// `cargo test` enables) and keeps everything else in-memory and ephemeral.
@@ -28,7 +30,7 @@ fn test_config(dir: &std::path::Path) -> Config {
 #[tokio::test]
 async fn manager_starts_and_stops_cleanly() {
     let dir = tempfile::tempdir().unwrap();
-    let manager = Manager::new(test_config(dir.path()));
+    let manager = ClawChorus::new(test_config(dir.path()));
     let (addr, handle) = manager.start("manager").unwrap();
 
     // Let pre_start spawn the children.
@@ -49,7 +51,7 @@ async fn manager_stops_itself_when_child_fails() {
     // which terminates it and notifies the Manager (its supervisor).
     config.server.host = "not-an-ip-address".to_string();
 
-    let manager = Manager::new(config);
+    let manager = ClawChorus::new(config);
     let (_addr, handle) = manager.start("manager").unwrap();
 
     // HttpServer fails async; the Manager should see SupervisionEvent::Terminated,

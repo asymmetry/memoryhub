@@ -1,6 +1,3 @@
-//! Top-level supervisor actor. Owns and supervises [`LlmService`],
-//! [`MemoryManager`], and [`HttpServer`].
-
 use std::future::Future;
 
 use acktor::{
@@ -12,12 +9,12 @@ use tokio::task::JoinHandle;
 use tracing::{debug, error, info, warn};
 
 use crate::config::Config;
-use crate::error::ManagerError;
+use crate::error::ClawChorusError;
 use crate::http::HttpServer;
-use crate::llm::{LlmService, provider::build_provider};
+use crate::llm::{LlmService, build_provider};
 use crate::memory::MemoryManager;
 
-pub struct Manager {
+pub struct ClawChorus {
     config: Config,
     llm: Option<Address<LlmService>>,
     memory: Option<Address<MemoryManager>>,
@@ -27,10 +24,8 @@ pub struct Manager {
     http_handle: Option<JoinHandle<()>>,
 }
 
-impl Manager {
-    /// Create the Manager. Children are not spawned here — they are spawned in
-    /// [`Actor::pre_start`] once the Manager actor itself starts, so each child
-    /// can be given the Manager as its supervisor at init time.
+impl ClawChorus {
+    /// Constructs the a new `ClawChorus` instance.
     pub fn new(config: Config) -> Self {
         Self {
             config,
@@ -44,11 +39,11 @@ impl Manager {
     }
 }
 
-impl Actor for Manager {
+impl Actor for ClawChorus {
     type Context = Context<Self>;
-    type Error = ManagerError;
+    type Error = ClawChorusError;
 
-    fn pre_start(&mut self, ctx: &mut Self::Context) -> Result<(), ManagerError> {
+    fn pre_start(&mut self, ctx: &mut Self::Context) -> Result<(), ClawChorusError> {
         let Config {
             server,
             memory,
@@ -83,13 +78,13 @@ impl Actor for Manager {
         Ok(())
     }
 
-    async fn post_start(&mut self, _ctx: &mut Self::Context) -> Result<(), ManagerError> {
+    async fn post_start(&mut self, _ctx: &mut Self::Context) -> Result<(), ClawChorusError> {
         info!("ClawChorus is ready");
 
         Ok(())
     }
 
-    async fn post_stop(&mut self, _ctx: &mut Self::Context) -> Result<(), ManagerError> {
+    async fn post_stop(&mut self, _ctx: &mut Self::Context) -> Result<(), ClawChorusError> {
         // Drain in reverse startup order: HTTP first (stop accepting work),
         // then MemoryManager (flush in-flight ops), then LLM.
         if let (Some(addr), Some(handle)) = (self.http.take(), self.http_handle.take()) {
@@ -108,7 +103,7 @@ impl Actor for Manager {
     }
 }
 
-impl Handler<SupervisionEvent<MemoryManager>> for Manager {
+impl Handler<SupervisionEvent<MemoryManager>> for ClawChorus {
     type Result = ();
 
     fn handle(
@@ -138,7 +133,7 @@ impl Handler<SupervisionEvent<MemoryManager>> for Manager {
     }
 }
 
-impl Handler<SupervisionEvent<LlmService>> for Manager {
+impl Handler<SupervisionEvent<LlmService>> for ClawChorus {
     type Result = ();
 
     fn handle(
@@ -168,7 +163,7 @@ impl Handler<SupervisionEvent<LlmService>> for Manager {
     }
 }
 
-impl Handler<SupervisionEvent<HttpServer>> for Manager {
+impl Handler<SupervisionEvent<HttpServer>> for ClawChorus {
     type Result = ();
 
     fn handle(

@@ -1,6 +1,9 @@
-pub mod config;
 pub mod error;
+
+pub mod config;
 pub mod http;
 pub mod llm;
-pub mod manager;
 pub mod memory;
+
+mod manager;
+pub use manager::ClawChorus;

@@ -5,7 +5,3 @@ Centralized memory management/sharing tool for OpenClaw. See `docs/superpowers/s
 ## Rules
 
 - Run `cargo fmt` after modifying `.rs` files
-
-## Branch
-
-Feature work is on branch `prototype`.

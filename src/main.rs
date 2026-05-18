@@ -4,7 +4,7 @@ use acktor::{Actor, ErrorReport, Signal};
 use anyhow::Result;
 use tracing::{info, warn};
 
-use clawchorus::{config, manager::Manager};
+use clawchorus::{ClawChorus, config};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -22,7 +22,7 @@ async fn main() -> Result<()> {
         config.llm.provider, config.llm.model
     );
 
-    let manager = Manager::new(config);
+    let manager = ClawChorus::new(config);
     let (manager_addr, mut manager_handle) = manager.start("mgr")?;
 
     tokio::select! {
@@ -30,7 +30,7 @@ async fn main() -> Result<()> {
             info!("Ctrl-c received, stopping ClawChorus...");
 
             if let Err(e) = manager_addr.do_send(Signal::Stop).await {
-                warn!("Could not signal Manager: {}", e.report());
+                warn!("Could not signal ClawChorus: {}", e.report());
             }
 
             tokio::time::timeout(Duration::from_secs(5), manager_handle).await??;

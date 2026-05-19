@@ -51,20 +51,18 @@ Messages between child actors:
 
 ### Synthesizer Messages
 
-| From         | Message               | Reply               |
-| ------------ | --------------------- | ------------------- |
-| FileOp Actor | FileChanged(rel_path) | — (fire-and-forget) |
+| From         | Message               | Reply                  |
+| ------------ | --------------------- | ---------------------- |
+| FileOp Actor | FileChanged(rel_path) | None (fire-and-forget) |
 
 ### LLM Service Messages
 
-| From                                      | Message              | Reply                                                         |
-| ----------------------------------------- | -------------------- | ------------------------------------------------------------- |
-| FileOp Actor / Search Actor / Synthesizer | Embed(Vec\<String\>) | Vec\<Embedding\> |
-| Synthesizer                               | StartSession         | Addr\<Session\> (spawns long-lived child actor)               |
-| Synthesizer → Session                     | SendMessage(message) | response                                                      |
-| Synthesizer → Session                     | StopSession          | Ok                                                            |
+| From                                      | Message                                    | Reply            |
+| ----------------------------------------- | ------------------------------------------ | ---------------- |
+| FileOp Actor / Search Actor / Synthesizer | Embed(Vec\<String\>)                       | Vec\<Embedding\> |
+| Synthesizer                               | Synthesize(target, prior_summary, sources) | synthesized text |
 
-Sessions have an idle timeout — if no message is received within the timeout period, the Session actor self-terminates.
+`Synthesize` routes to a long-lived per-target synthesis task inside LLM Service that owns prompt engineering and conversation context. See `llm-service-design.md`.
 
 ## Pipelines
 
@@ -101,23 +99,14 @@ Sessions have an idle timeout — if no message is received within the timeout p
 
 ### Synthesizer
 
-**On FileChanged(rel_path):**
+**On FileChanged(rel_path):** accumulate the path into a pending set. Processing triggers once the cool-down timer expires, then the timer resets.
 
-1. Accumulate the path into a pending set.
-2. If cool-down has not expired, wait.
-3. If cool-down has expired, trigger processing and reset the timer.
+**Processing (when cool-down expires)** runs two passes. The Synthesizer feeds only the files that changed this cycle to LLM Service; the long-lived synthesis tasks there preserve prior context, so raw memories are never re-sent in bulk. `prior_summary` is the current on-disk summary, passed so a cold or just-reset task can reseed without losing state. Each synthesis: Read the source files from Storage, send `Synthesize` to LLM Service, chunk and `Embed` the returned text, then Write it to Storage and Insert it into Index.
 
-**Processing (when cool-down expires):**
+- _Per-user pass_ — group the pending paths by user (first path segment, skipping `_synthesized`). For each affected user: read that user's changed files plus the current `{username}/_synthesized/summary.md` (the `prior_summary`), send `Synthesize(User(username), prior_summary, sources)`, and write the result back to `{username}/_synthesized/summary.md`. A failure for one user is logged and skipped; remaining users still proceed.
+- _Overall pass_ — runs if at least one per-user summary was regenerated. The sources are the per-user summaries produced this cycle; with the current `_synthesized/summary.md` as `prior_summary`, send `Synthesize(Overall, prior_summary, sources)` and write the result to `_synthesized/summary.md`.
 
-1. For each path in the pending set: Send Read(rel_path) → Storage
-2. Send StartSession → LLM Service, receive Session address
-3. Send SendMessage(prompt) → Session (repeat for multi-turn conversation; Synthesizer owns all context and prompt engineering)
-4. Send StopSession → Session
-5. Chunk and embed the synthesized result via Embed → LLM Service
-6. Derive synthesis output path (per-user: `{username}/_synthesized/...`, cross-user: `_synthesized/...`)
-7. Send Write(synthesis_path, synthesis_content) → Storage
-8. Send Insert(synthesis_path, chunks_with_embeddings) → Index
-9. Clear the pending set
+Both `daily_note` and `long_term` raw files feed the same per-user task — there is no per-memory-type synthesis. Both summary files are stable paths, overwritten each run. Finally, clear the pending set.
 
 ## Storage Actor
 
@@ -143,12 +132,12 @@ Where:
 - `memory_type` — snake_case directory: `daily_note` or `long_term`
 - `filename` — the original filename (e.g. `2026-03-31.md`, `MEMORY.md`)
 
-Synthesized files produced by the Synthesizer use two levels:
+Synthesized files produced by the Synthesizer use two levels, each a single stable file overwritten on every synthesis run (no history is kept):
 
-- **Per-user synthesis:** `{memory_dir}/{username}/_synthesized/{memory_type}/{filename}`
-- **General (cross-user) synthesis:** `{memory_dir}/_synthesized/{memory_type}/{filename}`
+- **Per-user synthesis:** `{memory_dir}/{username}/_synthesized/summary.md`
+- **General (cross-user) synthesis:** `{memory_dir}/_synthesized/summary.md`
 
-The `_synthesized` directory distinguishes synthesized output from raw agent memories at both levels.
+A per-user summary folds together both memory types for that user, so there is no `memory_type` segment in synthesized paths. The `_synthesized` directory distinguishes synthesized output from raw agent memories at both levels.
 
 The `rel_path` passed to Storage messages is always relative to `memory_dir`. Path derivation is the caller's responsibility (FileOp Actor for raw memories, Synthesizer for synthesized files).
 
@@ -224,13 +213,7 @@ SearchResult {
 
 ## Synthesizer Actor
 
-- Long-lived child of Memory Manager
-- Event-driven: triggered by FileChanged messages from FileOp Actor
-- Maintains a cool-down timer (configurable) to batch rapid changes — each incoming FileChanged accumulates the path; processing triggers only when the cool-down has expired
-- Reads changed file content from Storage
-- Constructs prompts and drives multi-turn conversation with LLM Service (Synthesizer owns all context and prompt engineering)
-- Chunks and embeds the synthesized output
-- Writes synthesis to Storage and Index
+Long-lived child of Memory Manager. FileChanged messages from FileOp Actor accumulate into a pending set, batched by a configurable cool-down timer; on expiry it runs the two-pass synthesis described under [Pipelines → Synthesizer](#synthesizer). It reads changed files and prior summaries from Storage, delegates the synthesis itself to LLM Service via `Synthesize`, and writes the results back through Storage and Index. Prompt engineering and conversation context live in LLM Service, not here.
 
 ## Error Types
 
@@ -249,6 +232,6 @@ Per-module error types. No `anyhow` in library code — only in `main.rs`.
 - Storage messages (`StorageWrite`, `StorageRead`, `StorageDelete`) → `Result<_, StorageError>`
 - Index messages (`IndexInsert`, `IndexDelete`, `IndexSearch`, `EnsureVecReady`) → `Result<_, IndexError>`
 - External messages (`FileOpWrite`, `FileOpRead`, `FileOpDelete`, `Search`) → `Result<_, MemoryError>`
-- `LlmService` messages (`Embed`, `StartSession`) → `Result<_, LlmError>`
+- `LlmService` messages (`Embed`, `Synthesize`) → `Result<_, LlmError>`
 
 `MemoryError` converts from child errors automatically via `From` impls, so `?` works naturally in MemoryManager handlers.

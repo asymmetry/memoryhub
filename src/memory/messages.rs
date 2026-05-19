@@ -19,7 +19,7 @@ use crate::memory::{
 // ---------------------------------------------------------------------------
 
 /// A chunk of text extracted from a memory file, with its embedding vector.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct Chunk {
     pub text: String,
     /// 1-indexed start line in the original file.
@@ -70,7 +70,7 @@ pub struct StorageDelete {
 // ---------------------------------------------------------------------------
 
 /// Insert or replace a file's chunks in the index.
-#[derive(Debug, Clone, Message)]
+#[derive(Debug, Message)]
 #[result_type(Result<(), IndexError>)]
 pub struct IndexInsert {
     pub path: String,
@@ -98,7 +98,7 @@ pub struct EnsureVecReady {
 }
 
 /// Search the index using embedding vectors.
-#[derive(Debug, Clone, Message)]
+#[derive(Debug, Message)]
 #[result_type(Result<Vec<SearchResult>, IndexError>)]
 pub struct IndexSearch {
     pub embeddings: Vec<Embedding>,

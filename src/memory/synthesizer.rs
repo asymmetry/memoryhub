@@ -9,7 +9,6 @@
 use std::collections::BTreeSet;
 use std::time::Duration;
 
-use acktor::message::FutureMessageResult;
 use acktor::{Actor, ActorContext, Address, Context, Handler, Message};
 use tokio::time::Instant;
 use tracing::{error, info, trace, warn};
@@ -252,42 +251,31 @@ impl Actor for Synthesizer {
 }
 
 impl Handler<FileChanged> for Synthesizer {
-    type Result = FutureMessageResult<FileChanged>;
+    type Result = ();
 
-    async fn handle(
-        &mut self,
-        msg: FileChanged,
-        ctx: &mut Self::Context,
-    ) -> FutureMessageResult<FileChanged> {
+    async fn handle(&mut self, msg: FileChanged, ctx: &mut Self::Context) {
         trace!(rel_path = %msg.rel_path, "Synthesizer: FileChanged");
         self.pending.insert(msg.rel_path);
         self.last_event = Some(Instant::now());
 
         let addr = ctx.address().clone();
         let cooldown = self.cooldown;
-        FutureMessageResult::new(async move {
-            tokio::spawn(async move {
-                tokio::time::sleep(cooldown).await;
-                let _ = addr.do_send(CooldownTick).await;
-            });
-        })
+        tokio::spawn(async move {
+            tokio::time::sleep(cooldown).await;
+            let _ = addr.do_send(CooldownTick).await;
+        });
     }
 }
 
 impl Handler<CooldownTick> for Synthesizer {
-    type Result = FutureMessageResult<CooldownTick>;
+    type Result = ();
 
-    async fn handle(
-        &mut self,
-        _msg: CooldownTick,
-        _ctx: &mut Self::Context,
-    ) -> FutureMessageResult<CooldownTick> {
+    async fn handle(&mut self, _msg: CooldownTick, _ctx: &mut Self::Context) {
         let should_process = matches!(self.last_event, Some(t) if t.elapsed() >= self.cooldown);
         if !should_process {
-            return FutureMessageResult::new(async {});
+            return;
         }
         self.process().await;
-        FutureMessageResult::new(async {})
     }
 }
 

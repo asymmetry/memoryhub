@@ -9,37 +9,37 @@ use acktor::{Actor, Address, Context, Handler, Message, message::FutureMessageRe
 use tracing::trace;
 
 use crate::llm::config::LlmConfig;
-
-use crate::llm::provider::Provider;
 use crate::llm::session::Session;
 
 mod error;
 pub use crate::llm::error::LlmError;
 
 pub mod config;
-pub mod provider;
 pub mod session;
 
+pub mod provider;
+pub use provider::{Provider, build_provider};
+
 /// A single embedding vector.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct Embedding(pub Vec<f32>);
 
 /// Result of an embedding request.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct EmbedResult {
     pub model: String,
     pub embeddings: Vec<Embedding>,
 }
 
 /// Embed a batch of text strings, returning one [`Embedding`] per input.
-#[derive(Debug, Clone, Message)]
+#[derive(Debug, Message)]
 #[result_type(Result<EmbedResult, LlmError>)]
 pub struct Embed {
     pub texts: Vec<String>,
 }
 
 /// Open a new conversation session. Reply is the spawned `Session` actor's address.
-#[derive(Debug, Clone, Message)]
+#[derive(Debug, Message)]
 #[result_type(Result<Address<Session>, LlmError>)]
 pub struct StartSession;
 

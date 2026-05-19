@@ -2,15 +2,19 @@
 
 ## Overview
 
-The LLM Service actor handles all outbound model API traffic for ClawChorus. It exposes two capabilities — embedding text batches and running multi-turn chat sessions — and isolates provider-specific HTTP details behind a single async `Provider` trait. It is a child of the top-level `Manager` supervisor, sibling to `MemoryManager` and the HTTP server.
+The LLM Service actor handles all outbound model API traffic for ClawChorus. It exposes two clearly separated capabilities — **embedding** text batches and **synthesizing** documents — and isolates provider-specific HTTP details behind a single async `Provider` trait. It is a child of the top-level `Manager` supervisor, sibling to `MemoryManager` and the HTTP server.
+
+Embedding and synthesis are kept apart at every level: separate child actors, separate messages, separate provider methods.
 
 ## Module Layout
 
 ```
-src/llm.rs                       LlmService actor + public messages (Embed, StartSession)
+src/llm.rs                       LlmService actor + public messages (Embed, Synthesize)
 src/llm/config.rs                LlmConfig
 src/llm/error.rs                 LlmError
-src/llm/session.rs               Session actor + SendMessage / StopSession
+src/llm/embedder.rs              Embedder actor
+src/llm/synthesis.rs             SynthesisTask actor + SynthesisTarget, SourceDoc
+src/llm/template.rs              prompt template resolution + loading
 src/llm/provider.rs              Provider trait, ChatMessage, ChatResponse, retry helper, build_provider
 src/llm/provider/deepseek.rs     DeepSeek implementation (default)
 ```
@@ -18,33 +22,41 @@ src/llm/provider/deepseek.rs     DeepSeek implementation (default)
 ## Actor Hierarchy
 
 ```
-LlmService (long-lived, child of Manager)
-  └── Session (per-conversation, long-lived until StopSession or idle)
+LlmService (long-lived, child of Manager) — single entry point
+  ├── Embedder (long-lived) — handles Embed
+  └── SynthesisTask (long-lived, one per SynthesisTarget; idle-terminates)
 ```
 
-No per-request child actor for embedding — `Embed` is handled with `FutureMessageResult` inline so `LlmService`'s mailbox stays responsive while the HTTP call is in flight.
+- `LlmService` constructs the `Arc<dyn Provider>` at startup and clones it into each child.
+- `Embedder` is spawned once at startup.
+- A `SynthesisTask` is spawned lazily on the first `Synthesize` for a given target and kept alive across cool-down cycles so it preserves conversation context. It self-terminates after an idle period; the next `Synthesize` for that target spawns a fresh one.
 
 ## External Messages
 
 Messages received by `LlmService`:
 
-| Message      | Fields             | Reply                       |
-| ------------ | ------------------ | --------------------------- |
-| Embed        | texts: Vec<String> | EmbedResult / LlmError      |
-| StartSession | —                  | Address<Session> / LlmError |
+| Message    | Fields                                                                              | Reply                  |
+| ---------- | ----------------------------------------------------------------------------------- | ---------------------- |
+| Embed      | texts: Vec\<String\>                                                                | EmbedResult / LlmError |
+| Synthesize | target: SynthesisTarget, prior_summary: Option\<String\>, sources: Vec\<SourceDoc\> | String / LlmError      |
 
-Messages received by `Session`:
+```rust
+pub enum SynthesisTarget {
+    User(String),   // per-user synthesis; the String is the username
+    Overall,        // cross-user synthesis
+}
 
-| Message     | Fields          | Reply             |
-| ----------- | --------------- | ----------------- |
-| SendMessage | content: String | String / LlmError |
-| StopSession | —               | Ok                |
+pub struct SourceDoc {
+    pub name: String,     // a label for the document, e.g. its rel_path
+    pub content: String,
+}
+```
 
-A session is owned by the caller that opened it: the caller sends `StartSession` → receives an `Address<Session>` → sends `SendMessage` directly → sends `StopSession` when done. Sessions also self-terminate on idle (see Idle Timeout).
+`SynthesisTarget` selects **both** the long-lived task to route to and the prompt template kind (`User` → `per_user`, `Overall` → `overall`). Callers never hold a task address — `LlmService` owns task routing and lifecycle. `Embedder` and `SynthesisTask` have no externally-visible messages.
 
 ## Provider Trait
 
-A plain trait, not an actor. `LlmService` constructs one `Arc<dyn Provider>` at startup and clones the `Arc` into each `Session` and each in-flight `Embed` future.
+A plain trait, not an actor. `LlmService` constructs one `Arc<dyn Provider>` at startup and clones the `Arc` into the `Embedder` and each `SynthesisTask`.
 
 ```rust
 // src/llm/provider.rs
@@ -69,6 +81,10 @@ pub struct ChatResponse {
 }
 
 pub trait Provider: Send + Sync + 'static {
+    /// Provider name, e.g. "deepseek". Used to resolve provider-specific
+    /// prompt templates.
+    fn name(&self) -> &str;
+
     fn embed<'a>(
         &'a self,
         texts: &'a [String],
@@ -93,10 +109,8 @@ The trait does not use the `async_trait` crate. Methods are declared as `fn` ret
 pub struct LlmService {
     config: LlmConfig,
     provider: Arc<dyn Provider>,
-}
-
-impl LlmService {
-    pub fn new(config: LlmConfig, provider: Arc<dyn Provider>) -> Self { ... }
+    embedder: Address<Embedder>,
+    tasks: HashMap<SynthesisTarget, Address<SynthesisTask>>,
 }
 
 impl Actor for LlmService {
@@ -105,83 +119,98 @@ impl Actor for LlmService {
 }
 ```
 
+`LlmService::new` builds the actor; `Embedder` is started in `Actor::starting`.
+
 ### Handlers
 
-- **`Handler<Embed>`** returns `FutureMessageResult<Embed>`. Clones `self.provider` and `self.config.max_retries`, moves them into the returned future, and calls `retry(max_retries, || provider.embed(&texts))`. Returns `EmbedResult`.
-- **`Handler<StartSession>`** returns `FutureMessageResult<StartSession>`. In the future, constructs `Session::new(provider.clone(), config.model.clone(), idle_timeout, max_retries)`, starts it with a generated label, returns the `Address<Session>`. Errors from `start` are mapped to `LlmError::Actor`.
+- **`Handler<Embed>`** returns `FutureMessageResult<Embed>`. Clones the `Embedder` address and forwards the `Embed` message to it in the returned future, so `LlmService`'s mailbox stays responsive.
+- **`Handler<Synthesize>`** returns `FutureMessageResult<Synthesize>`. Inline (before returning the future), it gets-or-spawns the `SynthesisTask` for `target`: if the map has no entry it spawns a fresh task and stores it. The returned future forwards the `Synthesize` message to that task and awaits the result.
 
-`LlmService` itself is otherwise stateless.
+`LlmService` supervises its `SynthesisTask` children; when one terminates on idle, `LlmService` removes its entry from `tasks`, so the next `Synthesize` for that target spawns a fresh task.
 
-## Session Actor
+## Embedder Actor
 
 ```rust
-pub struct Session {
+pub struct Embedder {
+    provider: Arc<dyn Provider>,
+    max_retries: u32,
+}
+```
+
+- **`Handler<Embed>`** returns `FutureMessageResult<Embed>`. Clones `provider` and `max_retries` into the returned future and calls `retry(max_retries, || provider.embed(&texts))`. Returns `EmbedResult`.
+
+`Embedder` is otherwise stateless. It exists as its own actor so embedding is fully isolated from synthesis.
+
+## SynthesisTask Actor
+
+One long-lived actor per `SynthesisTarget`. It owns the conversation context for that target so successive cool-down cycles refine a synthesis instead of rebuilding it.
+
+```rust
+pub struct SynthesisTask {
     provider: Arc<dyn Provider>,
     model: String,
-    history: Vec<ChatMessage>,
+    kind: TemplateKind,        // per_user | overall, derived from the target
+    prompts_dir: PathBuf,
+    history: Vec<ChatMessage>, // accumulated User/Assistant turns, no system message
     idle_timeout: Duration,
     last_activity: Instant,
     max_retries: u32,
+    context_max_chars: usize,  // reset threshold
 }
 
-impl Actor for Session {
+impl Actor for SynthesisTask {
     type Context = CronContext<Self>;
     type Error = LlmError;
 }
 ```
 
-### Handlers
+### Handler<Synthesize>
 
-- **`Handler<SendMessage>`** returns `FutureMessageResult<SendMessage>`. Pushes `ChatMessage { role: User, content }` into `history`, calls `retry(max_retries, || provider.chat(&history))`, pushes the assistant reply into `history`, updates `last_activity`, returns the reply string.
-- **`Handler<StopSession>`** sends `Signal::Terminate` to its own address (matches current stub behavior).
+Returns `FutureMessageResult<Synthesize>`. Steps:
 
-The current `model` field on the provider response is propagated; `Session` stores only the configured `model` name to pass nothing extra on the wire — the provider is responsible for that.
+1. **Hot-reload** the prompt template for `(provider.name(), kind)` from `prompts_dir` (see Prompt Templates). It becomes the `System` message — re-read every call so prompt edits take effect with no restart.
+2. If `history` is empty and `prior_summary` is `Some`, push a `User` turn carrying the summary as the task's starting context. (`history` is empty for a freshly spawned task, after a restart, and after a threshold reset — this single step covers all three.)
+3. Push the `sources` as a `User` turn.
+4. Call `retry(max_retries, || provider.chat(&[system] ++ history))`.
+5. Push the assistant reply into `history`; update `last_activity`.
+6. If the total size of `history` now exceeds `context_max_chars`, clear `history`. The next `Synthesize` reseeds from its `prior_summary` — bounding context without losing state, since the summary is the distilled form of everything fed so far.
+7. Return the reply string.
+
+The reply is the synthesized document. The caller (Synthesizer) writes it to disk and indexes it; `SynthesisTask` never touches Storage.
 
 ### Idle Timeout
 
-Implemented via acktor's `CronActor` trait — no detached tokio task.
+Implemented via acktor's `CronActor` trait (no detached tokio task): the cron callback terminates the actor once `last_activity` exceeds `idle_timeout`, otherwise reschedules itself for the remaining interval. A terminated task drops its in-memory context; `LlmService` removes it from `tasks` (see Handlers), so the next `Synthesize` for that target spawns a fresh task that reseeds from `prior_summary`.
 
-```rust
-impl CronActor for Session {
-    async fn task(&mut self, ctx: &mut Self::Context) -> Result<Duration, LlmError> {
-        let elapsed = self.last_activity.elapsed();
-        if elapsed >= self.idle_timeout {
-            trace!("Session idle, terminating");
-            ctx.address().do_send(Signal::Terminate).await.ok();
-            return Ok(Duration::from_secs(3600)); // effectively unused after Terminate
-        }
-        let remaining = self.idle_timeout.saturating_sub(elapsed);
-        Ok(remaining.max(Duration::from_secs(1)))
-    }
-}
+## Prompt Templates
+
+Synthesis prompts live as Markdown files on disk so they can be changed without recompiling.
+
+```
+{prompts_dir}/
+  per_user.md            # default, used by any provider
+  overall.md
+  deepseek/
+    per_user.md          # optional override, used only when provider name == "deepseek"
+    overall.md
 ```
 
-`SendMessage` updates `last_activity` so the next `task()` invocation sees fresh activity. acktor manages the cron loop and shuts it down cleanly when the actor stops.
+- **Resolution** (`src/llm/template.rs`): for `(provider_name, kind)`, try `{prompts_dir}/{provider_name}/{kind}.md`; if absent, fall back to `{prompts_dir}/{kind}.md`.
+- **Hot-reload:** the file is read fresh on every `Synthesize` call. Editing a template takes effect on the next synthesis with no restart.
+- A template file is **static text** — the whole synthesis system prompt for that kind. There is no placeholder/interpolation mechanism; source documents are passed as chat messages, not spliced into the template.
+- A missing template (no provider override and no default) returns `LlmError::Config`.
 
-### System Prompts
-
-Not in v1. Callers wishing to seed a system instruction prepend it to the first user message. A future `SetSystemPrompt` message can promote this to a first-class field if needed.
+`prompts_dir` is configurable (see Config), default `./prompts`.
 
 ## Retry Helper
 
-Lives in `src/llm/provider.rs`, private to the module:
-
-```rust
-async fn retry<F, Fut, T>(max_attempts: u32, mut f: F) -> Result<T, LlmError>
-where
-    F: FnMut() -> Fut,
-    Fut: Future<Output = Result<T, LlmError>>;
-```
-
-Behavior:
+`retry(max_attempts, f)` in `src/llm/provider.rs`, private to the module, wraps a fallible async call:
 
 - Up to `max_attempts` total (default 3, from `LlmConfig::max_retries`).
-- Retries only on `LlmError::Transient`. Other errors return immediately.
-- Backoff: 250ms, 500ms, 1s — capped at 1s, with full jitter (`rand::random::<f64>() * delay`).
+- Retries only on `LlmError::Transient`; other errors return immediately.
+- Backoff 250ms / 500ms / 1s — capped at 1s, with full jitter.
 
 ## Error Types
-
-`LlmError` is extended from its current two variants:
 
 ```rust
 #[derive(Debug, Error)]
@@ -195,7 +224,7 @@ pub enum LlmError {
     #[error("LLM actor messaging error: {0}")]
     Actor(String),
     #[error("LLM config error: {0}")]
-    Config(String),            // missing API key env, invalid model
+    Config(String),            // missing API key env, invalid model, missing prompt template
 }
 ```
 
@@ -203,9 +232,24 @@ pub enum LlmError {
 
 ## Config
 
-`LlmConfig` gains three fields. Existing fields (`provider`, `api_key_env`, `model`, `embedding_model`, `embedding_dim`, `session_idle_timeout_secs`) are unchanged.
+`LlmConfig`:
 
 ```rust
+pub provider: String,                  // e.g. "deepseek"
+pub api_key_env: String,
+pub model: String,
+pub embedding_model: String,
+pub embedding_dim: u32,
+
+#[serde(default = "default_synthesis_idle_timeout_secs")]
+pub synthesis_idle_timeout_secs: u64,  // SynthesisTask idle timeout, default 300
+
+#[serde(default = "default_prompts_dir")]
+pub prompts_dir: PathBuf,              // default "./prompts"
+
+#[serde(default = "default_synthesis_context_max_chars")]
+pub synthesis_context_max_chars: usize, // reset threshold, default 200_000
+
 #[serde(default = "default_max_retries")]
 pub max_retries: u32,                  // default 3
 
@@ -216,7 +260,7 @@ pub request_timeout_secs: u64,         // default 30
 pub base_url: String,                  // default "https://api.deepseek.com"
 ```
 
-The API key is read at `build_provider` time from `std::env::var(&config.api_key_env)`; an unset variable returns `LlmError::Config`.
+`session_idle_timeout_secs` is renamed to `synthesis_idle_timeout_secs` since there is no longer a generic chat session. The API key is read at `build_provider` time from `std::env::var(&config.api_key_env)`; an unset variable returns `LlmError::Config`.
 
 ## DeepSeek Provider
 
@@ -232,7 +276,7 @@ pub struct DeepSeekProvider {
 }
 ```
 
-`DeepSeekProvider::new(config)` builds a `reqwest::Client` with `timeout = Duration::from_secs(config.request_timeout_secs)`, reads the API key, and stores model names.
+`DeepSeekProvider::new(config)` builds a `reqwest::Client` with `timeout = Duration::from_secs(config.request_timeout_secs)`, reads the API key, and stores model names. `name()` returns `"deepseek"`.
 
 ### embed
 
@@ -241,7 +285,7 @@ pub struct DeepSeekProvider {
 Request: `{ "model": embedding_model, "input": texts }`
 Response: `{ "data": [{ "embedding": [f32; dim], "index": u32 }, ...], "model": String }`
 
-Returns `EmbedResult { model, embeddings: data.iter().map(|d| Embedding(d.embedding.clone())).collect() }`. No internal batch-splitting in v1 — a single HTTP request per call. If a provider limit bites later, add splitting inside this method.
+Returns `EmbedResult { model, embeddings: data.iter().map(|d| Embedding(d.embedding.clone())).collect() }`. No internal batch-splitting in v1 — a single HTTP request per call.
 
 ### chat
 
@@ -263,44 +307,27 @@ Inside `DeepSeekProvider`:
 
 ## Wiring at Startup
 
-`Manager::starting` calls `build_provider(&config.llm)?` once, then spawns `LlmService::new(config.llm.clone(), provider)`. The signature change to `LlmService::new` is the only call-site update outside the `llm` module. `MemoryManager` continues to receive the `Address<LlmService>` it does today.
+`Manager::starting` calls `build_provider(&config.llm)?` once, then spawns `LlmService::new(config.llm.clone(), provider)`. `MemoryManager` continues to receive the `Address<LlmService>` it does today.
 
 ## Testing
 
-- **`provider::tests`** — a `MockProvider` (in-module `#[cfg(test)]`) records calls and returns canned responses or canned `LlmError`s. Used by `LlmService` and `Session` tests so they exercise the full actor path without HTTP.
-- **`LlmService` tests:**
-  - `Embed` returns the mock's vectors and the mock's model name.
-  - `StartSession` returns a working `Session` address whose `SendMessage` reaches the mock provider.
-- **`Session` tests:**
-  - `SendMessage` appends user + assistant turns to history and returns the canned reply.
-  - Multi-turn: two `SendMessage` calls — second call's `provider.chat` argument contains all four prior messages plus the new user turn.
-  - `StopSession` terminates the actor.
-  - Idle timeout: `idle_timeout = 100ms`, no activity → cron task terminates the actor within ~300ms.
-- **`retry` tests:**
-  - Transient → transient → success: 3 attempts, returns `Ok`.
-  - `Provider` error: 1 attempt, returns `Err`.
-  - 4 transient errors with `max_attempts = 3`: returns the last `Transient` error.
-- **DeepSeek provider** — `wiremock`-based:
-  - Happy-path embed: matches request body, returns canned embeddings, asserts decoded `EmbedResult`.
-  - Happy-path chat: matches request body, returns canned completion.
-  - 429 → 200 on retry: confirms `retry` actually re-issues the HTTP request when wrapped at the call site.
+A `MockProvider` (`#[cfg(test)]` in `provider.rs`) records calls and returns canned responses or `LlmError`s, so actor tests run the full path without HTTP.
+
+- **Embedder / LlmService:** `Embed` is forwarded and returns the mock's result; `Synthesize` spawns one task per target and reuses it across calls (the mock sees accumulated history).
+- **SynthesisTask:** `prior_summary` seeds an empty history before the sources; turns accumulate across cycles; a tiny `context_max_chars` triggers a reset that reseeds on the next call; idle timeout terminates the actor.
+- **template:** provider-specific file wins over default; default used when no override; neither present → `LlmError::Config`.
+- **retry:** retries transient errors up to `max_attempts`, returns immediately on non-transient, surfaces the last transient error when exhausted.
+- **DeepSeek provider:** `wiremock` happy-path embed and chat, plus 429 → 200 retry.
 
 No live API calls in unit tests.
 
 ## Out of Scope for v1
 
-Documented here so callers and future contributors do not assume them:
-
 - Streaming chat responses (token-by-token).
 - OpenAI / Anthropic providers (the trait is ready; implementations are not in this spec).
 - Concurrent embedding batch splitting.
-- System prompt as a first-class field on `StartSession`.
+- A generic externally-driven multi-turn chat API — synthesis is the only chat consumer and is fully encapsulated.
+- Placeholder/variable interpolation in prompt templates.
+- Persisting `SynthesisTask` context across process restarts (recovery is via `prior_summary`).
 - Token accounting and cost tracking.
-- Per-call model override (each `Session` is pinned to one model at start).
-
-## Parent-Spec Corrections
-
-This work updates two existing documents to match the inline `FutureMessageResult` approach for `Embed`:
-
-- `docs/superpowers/specs/clawchorus-design.md` — the LLM Sub-system bullet currently reads "generate embeddings (spawns short-lived child per request), manage conversation sessions". Update to: "generate embeddings (handled inline on `LlmService` via a non-blocking future), manage conversation sessions".
-- `docs/superpowers/specs/memory-manager-design.md` — the LLM Service Messages table's `Embed` row currently says "spawns short-lived child actor per request". Drop that parenthetical; the new wording is simply "Vec\<Embedding\>".
+- Per-call model override (each `SynthesisTask` is pinned to one model).

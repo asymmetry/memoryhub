@@ -26,6 +26,12 @@ use crate::memory::{
 /// Shorthand for results in this module.
 type Result<T> = std::result::Result<T, MemoryError>;
 
+/// Supervisor actor for the memory sub-system.
+///
+/// Owns the long-lived Storage, Index, and Synthesizer child actors, and
+/// dispatches each incoming [`FileOpWrite`]/[`FileOpRead`]/[`FileOpDelete`]/
+/// [`Search`] message to a short-lived child actor that runs the request
+/// pipeline off-mailbox.
 pub struct MemoryManager {
     config: MemoryConfig,
     storage: Address<Storage>,
@@ -38,6 +44,12 @@ pub struct MemoryManager {
 }
 
 impl MemoryManager {
+    /// Creates a Memory Manager, spawning its Storage, Index, and Synthesizer
+    /// child actors from `config`.
+    ///
+    /// The Index is opened in memory when `config.db_path` is `":memory:"`,
+    /// otherwise it is opened at that path. Returns an error if any child actor
+    /// or the index fails to start.
     pub fn new(config: MemoryConfig, llm: Address<LlmService>) -> Result<Self> {
         let memory_dir = PathBuf::from(&config.memory_dir);
         let storage = Storage::new(memory_dir);

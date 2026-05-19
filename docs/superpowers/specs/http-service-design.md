@@ -69,12 +69,12 @@ Read maps `Ok(None)` from `FileOpRead` to a 404. `Ok(Some(content))` maps to 200
 
 Handlers return `Result<Json<T>, HttpError>`. `HttpError` is a single enum implementing `axum::response::IntoResponse`. All non-2xx responses share the shape `{"error": <code>, "message"?: <string>}`.
 
-| Source                                       | Status | Body                                          |
-| -------------------------------------------- | ------ | --------------------------------------------- |
-| JSON deserialization failure (Axum built-in) | 400    | `{"error": "bad_request", "message": "..."}`  |
-| `FileOpRead` returns `Ok(None)`              | 404    | `{"error": "not_found"}`                      |
-| `MemoryError` from any actor call            | 500    | `{"error": "internal", "message": "..."}`     |
-| Mailbox/send failure (actor dead)            | 503    | `{"error": "unavailable"}`                    |
+| Source                                       | Status | Body                                         |
+| -------------------------------------------- | ------ | -------------------------------------------- |
+| JSON deserialization failure (Axum built-in) | 400    | `{"error": "bad_request", "message": "..."}` |
+| `FileOpRead` returns `Ok(None)`              | 404    | `{"error": "not_found"}`                     |
+| `MemoryError` from any actor call            | 500    | `{"error": "internal", "message": "..."}`    |
+| Mailbox/send failure (actor dead)            | 503    | `{"error": "unavailable"}`                   |
 
 The `message` field is included for 400 and 500 only. The 500 `message` is the `Display` form of the underlying error — already user-safe by codebase convention — not a debug dump. 404 and 503 are self-describing and omit `message`.
 

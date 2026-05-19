@@ -13,8 +13,8 @@ use rand::Rng;
 use tokio::time::sleep;
 use tracing::warn;
 
-use crate::llm::config::LlmConfig;
-use crate::llm::{EmbedResult, LlmError};
+use super::config::LlmConfig;
+use super::{EmbedResult, LlmError};
 
 pub mod deepseek;
 #[cfg(feature = "_test")]

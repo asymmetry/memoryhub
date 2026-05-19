@@ -68,7 +68,7 @@ pub fn config_path() -> Result<PathBuf, ConfigError> {
 }
 
 impl Config {
-    /// Load configuration from a TOML file at `path`.
+    /// Loads configuration from a TOML file at `path`.
     pub fn from_file(path: impl AsRef<Path>) -> Result<Self, ConfigError> {
         let path = path.as_ref();
         let raw = std::fs::read_to_string(path).map_err(|e| ConfigError::Read {
@@ -77,13 +77,13 @@ impl Config {
         })?;
         let config: Config = toml::from_str(&raw).map_err(|e| ConfigError::Parse {
             path: path.to_path_buf(),
-            source: e,
+            source: e.into(),
         })?;
 
         Ok(config)
     }
 
-    /// Load from `~/.clawchorus/config.toml`, falling back to all defaults
+    /// Loads configuration from `~/.clawchorus/config.toml`, falling back to all defaults
     /// if the file does not exist.
     pub fn load() -> Result<Self, ConfigError> {
         let path = config_path()?;

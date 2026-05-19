@@ -2,128 +2,183 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Replace the stub LLM Service with a real implementation backed by a `Provider` trait, a working DeepSeek provider, conversation history in `Session`, retries on transient failures, and acktor-cron-driven idle timeout.
+**Goal:** Bring the LLM service to its final form — two cleanly separated capabilities (embedding and synthesis), synthesis owning prompt engineering and conversation context behind a `Synthesize` message, and the Synthesizer rewired to feed only changed files. This plan supersedes the earlier LLM service plan and is written against the current codebase, which already has the stub-replacement implementation in place.
 
-**Architecture:** `LlmService` holds an `Arc<dyn Provider>` built once at startup and clones it into in-flight `Embed` futures and spawned `Session` actors. `Session` owns the full chat transcript and is a `CronActor` whose periodic `task()` self-terminates on idle. Provider impls are plain async — no `async_trait` crate.
+**Architecture:** `LlmService` stays the single entry point. It spawns one long-lived `Embedder` child and one long-lived `SynthesisTask` child per synthesis target (per-user / overall). `SynthesisTask` preserves conversation context across cool-down cycles, hot-reloads Markdown prompt templates from disk, and reseeds from a caller-supplied prior summary on cold start or context reset. The Synthesizer no longer drives LLM sessions — it reads changed files and prior summaries from Storage, calls `Synthesize`, and writes results back.
 
-**Tech Stack:** Rust 2024, acktor 1.1 (with `CronActor` / `CronContext`), reqwest, tokio, thiserror, rand (for jitter), wiremock (dev-dep).
-
-Spec: `docs/superpowers/specs/llm-service-design.md`.
+**Tech Stack:** Rust 2024, `acktor` actor framework, `tokio`, `reqwest`. Tests use the in-crate `MockProvider` (enabled by the `_test` feature via dev-dependencies).
 
 ---
+
+## Background for the implementer
+
+- Modules use the `foo.rs` + `foo/` layout (no `mod.rs`).
+- Run `cargo fmt` after modifying any `.rs` file (project rule).
+- Every `Handler::handle` starts with `trace!("Handle command {:?}", msg);`.
+- Log values are embedded in the message prose, not as structured `key=value` fields.
+- `acktor` actor round-trip: `addr.send(msg).await` → `Result<ResponseFuture, SendError>`; `.await` on the `ResponseFuture` → `Result<MessageResult, SendError>`. So a message whose `result_type` is `Result<T, E>` needs `addr.send(msg).await.map_err(..)?.await.map_err(..)?` to reach `Result<T, E>`, then `?` to reach `T`.
+- `ChildActor::start(label)` returns `Result<(Address<A>, JoinHandle<()>), _>`. Dropping the `JoinHandle` does not stop the actor; the actor lives while its `Address` is held.
+- The whole refactor keeps the crate compiling after every task. `StartSession`/`Session` survive until Task 8; they are removed only in Task 9 once nothing references them.
 
 ## File Structure
 
-**Create:**
-- `src/llm/provider.rs` — `Provider` trait, `ChatMessage`, `ChatResponse`, `Role`, `retry` helper, `build_provider`, `MockProvider` (cfg-test).
-- `src/llm/provider/deepseek.rs` — `DeepSeekProvider` impl + wiremock-based tests.
+**Created:**
+- `src/llm/embedder.rs` — `Embedder` actor; owns `provider.embed`.
+- `src/llm/synthesis.rs` — `SynthesisTask` actor, `SynthesisTarget`, `SourceDoc`, `Synthesize` message.
+- `src/llm/template.rs` — `TemplateKind` + `load_template` (provider-specific resolution, hot-reload).
+- `prompts/per_user.md`, `prompts/overall.md` — default synthesis prompt templates.
 
-**Modify:**
-- `src/llm.rs` — `LlmService` gains `Arc<dyn Provider>`; `Embed` handler uses retry; `StartSession` passes provider + model + retries.
-- `src/llm/session.rs` — `CronContext`, history field, retry-wrapped `chat`, cron-based idle timeout.
-- `src/llm/error.rs` — add `Transient`, `UnknownProvider`, `Config` variants.
-- `src/llm/config.rs` — add `max_retries`, `request_timeout_secs`, `base_url`.
-- `src/main.rs` — call `build_provider` and pass `Arc<dyn Provider>` into `LlmService::new`.
-- `Cargo.toml` — add `rand` dep, `wiremock` dev-dep.
-- `docs/superpowers/specs/clawchorus-design.md` — parent-spec correction (drop "spawns short-lived child per request").
-- `docs/superpowers/specs/memory-manager-design.md` — drop the same parenthetical from the Embed row.
+**Modified:**
+- `src/llm/provider.rs` — add `name()` to the `Provider` trait.
+- `src/llm/provider/deepseek.rs` — implement `name()`.
+- `src/llm/provider/mock.rs` — implement `name()`.
+- `src/llm/config.rs` — add `prompts_dir`, `synthesis_context_max_chars`; rename `session_idle_timeout_secs` → `synthesis_idle_timeout_secs`.
+- `src/llm.rs` — `Embedder` wiring, `Synthesize` handler, `TaskDied` internal message; `LlmService::new` returns `Result`; remove `StartSession`.
+- `src/manager.rs` — adjust the `LlmService::new` call site.
+- `src/memory/path.rs` — replace `derive_synthesis_path` with `per_user_synthesis_path` / `overall_synthesis_path`.
+- `src/memory/synthesizer.rs` — rewrite `process()` as a two-pass flow over `Synthesize`.
+- `src/memory/manager.rs` — fix a test path assertion and a `LlmService::new` call site.
 
----
-
-## Task 1: Cargo dependencies
-
-**Files:**
-- Modify: `Cargo.toml`
-
-- [ ] **Step 1: Add `rand` to `[dependencies]` and `wiremock` to `[dev-dependencies]`**
-
-Final lines (insert alphabetically):
-
-```toml
-rand = "0.9"
-```
-
-```toml
-[dev-dependencies]
-tempfile = "3"
-wiremock = "0.6"
-```
-
-- [ ] **Step 2: Verify it builds**
-
-Run: `cargo build`
-Expected: success.
-
-- [ ] **Step 3: Commit**
-
-```bash
-git add Cargo.toml Cargo.lock
-git commit -m "build: add rand and wiremock for LLM service"
-```
+**Deleted:**
+- `src/llm/session.rs` — the generic chat session actor (replaced by `SynthesisTask`).
 
 ---
 
-## Task 2: Extend `LlmError`
+## Task 1: Add `name()` to the `Provider` trait
 
 **Files:**
-- Modify: `src/llm/error.rs`
+- Modify: `src/llm/provider.rs:46-56` (trait), `src/llm/provider/deepseek.rs`, `src/llm/provider/mock.rs`
+- Test: `src/llm/provider/mock.rs` (test module added at end)
 
-- [ ] **Step 1: Replace the file contents**
+- [ ] **Step 1: Write the failing test**
+
+Append to `src/llm/provider/mock.rs` (after the `impl Provider for MockProvider` block):
 
 ```rust
-//! Error types for the LLM Service sub-system.
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-use thiserror::Error;
-
-/// Errors from LLM operations.
-#[derive(Debug, Error)]
-pub enum LlmError {
-    /// Retryable failure: network timeout, HTTP 5xx, HTTP 429.
-    #[error("transient LLM error: {0}")]
-    Transient(String),
-    /// Non-retryable provider failure: 4xx, parse error, auth error.
-    #[error("LLM provider error: {0}")]
-    Provider(String),
-    /// `LlmConfig::provider` did not match any known provider name.
-    #[error("unknown LLM provider: {0}")]
-    UnknownProvider(String),
-    /// Actor framework messaging failure.
-    #[error("LLM actor messaging error: {0}")]
-    Actor(String),
-    /// Configuration error (e.g. missing API key environment variable).
-    #[error("LLM config error: {0}")]
-    Config(String),
+    #[test]
+    fn mock_provider_reports_its_name() {
+        let m = MockProvider::new();
+        assert_eq!(m.name(), "mock");
+    }
 }
 ```
 
-- [ ] **Step 2: Verify it compiles**
+- [ ] **Step 2: Run test to verify it fails**
 
-Run: `cargo build`
-Expected: success (no callers reference the dropped variants).
+Run: `cargo test -p clawchorus --lib mock_provider_reports_its_name`
+Expected: FAIL — compile error, `no method named name found for struct MockProvider`.
 
-- [ ] **Step 3: `cargo fmt`**
+- [ ] **Step 3: Add `name()` to the trait**
 
-Run: `cargo fmt`
+In `src/llm/provider.rs`, add `name` as the first method of the `Provider` trait:
 
-- [ ] **Step 4: Commit**
+```rust
+pub trait Provider: Send + Sync + 'static {
+    /// Short provider identifier, e.g. `"deepseek"`. Used to resolve
+    /// provider-specific prompt templates.
+    fn name(&self) -> &str;
+
+    fn embed<'a>(
+        &'a self,
+        texts: &'a [String],
+    ) -> Pin<Box<dyn Future<Output = Result<EmbedResult, LlmError>> + Send + 'a>>;
+
+    fn chat<'a>(
+        &'a self,
+        messages: &'a [ChatMessage],
+    ) -> Pin<Box<dyn Future<Output = Result<ChatResponse, LlmError>> + Send + 'a>>;
+}
+```
+
+- [ ] **Step 4: Implement `name()` for `DeepSeekProvider`**
+
+In `src/llm/provider/deepseek.rs`, inside `impl Provider for DeepSeekProvider`, add as the first method:
+
+```rust
+    fn name(&self) -> &str {
+        "deepseek"
+    }
+```
+
+- [ ] **Step 5: Implement `name()` for `MockProvider`**
+
+In `src/llm/provider/mock.rs`, inside `impl Provider for MockProvider`, add as the first method:
+
+```rust
+    fn name(&self) -> &str {
+        "mock"
+    }
+```
+
+- [ ] **Step 6: Run tests and format**
+
+Run: `cargo test -p clawchorus --lib && cargo fmt`
+Expected: PASS — all existing tests plus `mock_provider_reports_its_name`.
+
+- [ ] **Step 7: Commit**
 
 ```bash
-git add src/llm/error.rs
-git commit -m "feat(llm): extend LlmError with transient/config/unknown-provider"
+git add src/llm/provider.rs src/llm/provider/deepseek.rs src/llm/provider/mock.rs
+git commit -m "feat(llm): add name() to Provider trait"
 ```
 
 ---
 
-## Task 3: Extend `LlmConfig`
+## Task 2: Extend `LlmConfig` for synthesis
 
 **Files:**
 - Modify: `src/llm/config.rs`
+- Modify: `src/llm.rs:86` (rename a field reference), `src/llm/provider/deepseek.rs:216` (test config field)
+- Test: `src/llm/config.rs` (existing test module)
 
-- [ ] **Step 1: Add three new fields plus their default fns**
+- [ ] **Step 1: Update the failing test**
 
-Replace the file with:
+In `src/llm/config.rs`, replace the `defaults_are_populated` test body and extend `partial_toml_uses_defaults_for_new_fields`:
 
 ```rust
+    #[test]
+    fn defaults_are_populated() {
+        let c = LlmConfig::default();
+        assert_eq!(c.synthesis_idle_timeout_secs, 300);
+        assert_eq!(c.max_retries, 3);
+        assert_eq!(c.request_timeout_secs, 30);
+        assert_eq!(c.base_url, "https://api.deepseek.com");
+        assert_eq!(c.prompts_dir, std::path::PathBuf::from("./prompts"));
+        assert_eq!(c.synthesis_context_max_chars, 200_000);
+    }
+
+    #[test]
+    fn partial_toml_uses_defaults_for_new_fields() {
+        let toml_in = r#"
+provider = "deepseek"
+api_key_env = "DEEPSEEK_API_KEY"
+model = "deepseek-chat"
+embedding_model = "deepseek-embedding"
+"#;
+        let c: LlmConfig = toml::from_str(toml_in).unwrap();
+        assert_eq!(c.max_retries, 3);
+        assert_eq!(c.synthesis_idle_timeout_secs, 300);
+        assert_eq!(c.prompts_dir, std::path::PathBuf::from("./prompts"));
+        assert_eq!(c.synthesis_context_max_chars, 200_000);
+    }
+```
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `cargo test -p clawchorus --lib defaults_are_populated`
+Expected: FAIL — compile error, no field `synthesis_idle_timeout_secs` / `prompts_dir` / `synthesis_context_max_chars`.
+
+- [ ] **Step 3: Update the struct, defaults, and `Default` impl**
+
+In `src/llm/config.rs`, replace the `session_idle_timeout_secs` field and add the two new fields:
+
+```rust
+use std::path::PathBuf;
+
 use serde::{Deserialize, Serialize};
 
 /// LLM / embedding provider settings.
@@ -141,9 +196,16 @@ pub struct LlmConfig {
     /// embedding response. Pin it for known models to avoid surprises.
     #[serde(default)]
     pub embedding_dim: Option<usize>,
-    /// Seconds a `Session` will sit idle before self-terminating.
-    #[serde(default = "default_session_idle_timeout_secs")]
-    pub session_idle_timeout_secs: u64,
+    /// Seconds a `SynthesisTask` will sit idle before self-terminating.
+    #[serde(default = "default_synthesis_idle_timeout_secs")]
+    pub synthesis_idle_timeout_secs: u64,
+    /// Directory holding synthesis prompt templates.
+    #[serde(default = "default_prompts_dir")]
+    pub prompts_dir: PathBuf,
+    /// Character budget for a `SynthesisTask`'s conversation history; once
+    /// exceeded, the history is cleared and reseeded from the prior summary.
+    #[serde(default = "default_synthesis_context_max_chars")]
+    pub synthesis_context_max_chars: usize,
     /// Maximum number of attempts (including the first) for a single
     /// provider call on transient failure.
     #[serde(default = "default_max_retries")]
@@ -156,10 +218,29 @@ pub struct LlmConfig {
     pub base_url: String,
 }
 
-fn default_session_idle_timeout_secs() -> u64 { 600 }
-fn default_max_retries() -> u32 { 3 }
-fn default_request_timeout_secs() -> u64 { 30 }
-fn default_base_url() -> String { "https://api.deepseek.com".to_string() }
+const fn default_synthesis_idle_timeout_secs() -> u64 {
+    300
+}
+
+fn default_prompts_dir() -> PathBuf {
+    PathBuf::from("./prompts")
+}
+
+const fn default_synthesis_context_max_chars() -> usize {
+    200_000
+}
+
+const fn default_max_retries() -> u32 {
+    3
+}
+
+const fn default_request_timeout_secs() -> u64 {
+    30
+}
+
+fn default_base_url() -> String {
+    "https://api.deepseek.com".to_string()
+}
 
 impl Default for LlmConfig {
     fn default() -> Self {
@@ -169,796 +250,249 @@ impl Default for LlmConfig {
             model: "deepseek-chat".to_string(),
             embedding_model: "deepseek-embedding".to_string(),
             embedding_dim: None,
-            session_idle_timeout_secs: 600,
+            synthesis_idle_timeout_secs: 300,
+            prompts_dir: PathBuf::from("./prompts"),
+            synthesis_context_max_chars: 200_000,
             max_retries: 3,
             request_timeout_secs: 30,
             base_url: "https://api.deepseek.com".to_string(),
         }
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn defaults_are_populated() {
-        let c = LlmConfig::default();
-        assert_eq!(c.session_idle_timeout_secs, 600);
-        assert_eq!(c.max_retries, 3);
-        assert_eq!(c.request_timeout_secs, 30);
-        assert_eq!(c.base_url, "https://api.deepseek.com");
-    }
-
-    #[test]
-    fn partial_toml_uses_defaults_for_new_fields() {
-        let toml_in = r#"
-provider = "deepseek"
-api_key_env = "DEEPSEEK_API_KEY"
-model = "deepseek-chat"
-embedding_model = "deepseek-embedding"
-"#;
-        let c: LlmConfig = toml::from_str(toml_in).unwrap();
-        assert_eq!(c.max_retries, 3);
-        assert_eq!(c.request_timeout_secs, 30);
-        assert_eq!(c.base_url, "https://api.deepseek.com");
-    }
-}
 ```
 
-- [ ] **Step 2: Run config tests**
+- [ ] **Step 4: Fix the `session_idle_timeout_secs` references**
 
-Run: `cargo test --lib llm::config`
-Expected: all pass.
+In `src/llm.rs:86`, change:
 
-- [ ] **Step 3: `cargo fmt`**
+```rust
+        let idle = Duration::from_secs(self.config.synthesis_idle_timeout_secs);
+```
 
-- [ ] **Step 4: Commit**
+In `src/llm/provider/deepseek.rs` (the test config near line 216), change the field name `session_idle_timeout_secs: 60` to `synthesis_idle_timeout_secs: 60`.
+
+In `src/llm.rs`, the test helper `cfg()` (around line 105) — change `session_idle_timeout_secs: 60` to `synthesis_idle_timeout_secs: 60`.
+
+- [ ] **Step 5: Run tests and format**
+
+Run: `cargo test -p clawchorus --lib && cargo fmt`
+Expected: PASS.
+
+- [ ] **Step 6: Commit**
 
 ```bash
-git add src/llm/config.rs
-git commit -m "feat(llm): add max_retries, request_timeout, base_url to LlmConfig"
+git add src/llm/config.rs src/llm.rs src/llm/provider/deepseek.rs
+git commit -m "feat(llm): add synthesis config fields, rename idle timeout"
 ```
 
 ---
 
-## Task 4: `Provider` trait, message types, and retry helper
+## Task 3: Prompt template module + default templates
 
 **Files:**
-- Create: `src/llm/provider.rs`
-- Modify: `src/llm.rs` (add `pub mod provider;` and re-exports)
+- Create: `src/llm/template.rs`
+- Create: `prompts/per_user.md`, `prompts/overall.md`
+- Modify: `src/llm.rs` (register the module)
 
-- [ ] **Step 1: Create `src/llm/provider.rs`**
+- [ ] **Step 1: Register the module**
+
+In `src/llm.rs`, add alongside the other `pub mod` lines (after `pub mod config;`):
 
 ```rust
-//! Provider trait + helpers for LLM Service.
+pub mod template;
+```
+
+- [ ] **Step 2: Write the failing test**
+
+Create `src/llm/template.rs`:
+
+```rust
+//! Prompt template resolution and loading for synthesis.
 //!
-//! Each provider (DeepSeek, OpenAI, ...) is a `Provider` impl. Providers are
-//! plain async types, not actors — `LlmService` owns one `Arc<dyn Provider>`
-//! at startup and clones it into in-flight futures and spawned sessions.
+//! Templates are Markdown files on disk, read fresh on every use so prompt
+//! changes take effect without recompiling or restarting.
 
-pub mod deepseek;
+use std::path::Path;
 
-use std::future::Future;
-use std::pin::Pin;
-use std::sync::Arc;
-use std::time::Duration;
-
-use rand::Rng;
-use tokio::time::sleep;
-use tracing::warn;
-
-use crate::llm::config::LlmConfig;
-use crate::llm::{EmbedResult, LlmError};
-
-/// Role of a chat message.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Role {
-    System,
-    User,
-    Assistant,
-}
-
-/// A single chat turn.
-#[derive(Debug, Clone)]
-pub struct ChatMessage {
-    pub role: Role,
-    pub content: String,
-}
-
-/// Response from a chat completion call.
-#[derive(Debug, Clone)]
-pub struct ChatResponse {
-    pub model: String,
-    pub content: String,
-}
-
-/// Abstract LLM provider. Implementations are plain async types (no actor).
-pub trait Provider: Send + Sync + 'static {
-    fn embed<'a>(
-        &'a self,
-        texts: &'a [String],
-    ) -> Pin<Box<dyn Future<Output = Result<EmbedResult, LlmError>> + Send + 'a>>;
-
-    fn chat<'a>(
-        &'a self,
-        messages: &'a [ChatMessage],
-    ) -> Pin<Box<dyn Future<Output = Result<ChatResponse, LlmError>> + Send + 'a>>;
-}
-
-/// Build a provider from config. Selects the impl by `config.provider`.
-pub fn build_provider(config: &LlmConfig) -> Result<Arc<dyn Provider>, LlmError> {
-    match config.provider.as_str() {
-        "deepseek" => Ok(Arc::new(deepseek::DeepSeekProvider::new(config)?)),
-        other => Err(LlmError::UnknownProvider(other.to_string())),
-    }
-}
-
-/// Retry `f` up to `max_attempts` total. Retries only on `LlmError::Transient`.
-/// Backoff: 250ms, 500ms, 1s — capped at 1s with full jitter.
-pub(crate) async fn retry<F, Fut, T>(max_attempts: u32, mut f: F) -> Result<T, LlmError>
-where
-    F: FnMut() -> Fut,
-    Fut: Future<Output = Result<T, LlmError>>,
-{
-    let max_attempts = max_attempts.max(1);
-    let mut attempt = 0u32;
-    loop {
-        attempt += 1;
-        match f().await {
-            Ok(v) => return Ok(v),
-            Err(LlmError::Transient(msg)) if attempt < max_attempts => {
-                let base_ms = match attempt {
-                    1 => 250u64,
-                    2 => 500u64,
-                    _ => 1000u64,
-                };
-                let jitter = rand::rng().random::<f64>();
-                let delay = Duration::from_millis((base_ms as f64 * jitter) as u64);
-                warn!(attempt, "transient LLM error, retrying in {:?}: {}", delay, msg);
-                sleep(delay).await;
-            }
-            Err(e) => return Err(e),
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// MockProvider — used by tests in this crate.
-// ---------------------------------------------------------------------------
-
-#[cfg(test)]
-pub(crate) mod mock {
-    use std::sync::Mutex;
-
-    use crate::llm::Embedding;
-
-    use super::*;
-
-    /// A `Provider` that records calls and replays scripted responses.
-    pub struct MockProvider {
-        pub embed_replies: Mutex<Vec<Result<EmbedResult, LlmError>>>,
-        pub chat_replies: Mutex<Vec<Result<ChatResponse, LlmError>>>,
-        pub embed_calls: Mutex<Vec<Vec<String>>>,
-        pub chat_calls: Mutex<Vec<Vec<ChatMessage>>>,
-    }
-
-    impl MockProvider {
-        pub fn new() -> Self {
-            Self {
-                embed_replies: Mutex::new(Vec::new()),
-                chat_replies: Mutex::new(Vec::new()),
-                embed_calls: Mutex::new(Vec::new()),
-                chat_calls: Mutex::new(Vec::new()),
-            }
-        }
-
-        pub fn push_embed(&self, reply: Result<EmbedResult, LlmError>) {
-            self.embed_replies.lock().unwrap().push(reply);
-        }
-
-        pub fn push_chat(&self, reply: Result<ChatResponse, LlmError>) {
-            self.chat_replies.lock().unwrap().push(reply);
-        }
-
-        pub fn embed_call_count(&self) -> usize {
-            self.embed_calls.lock().unwrap().len()
-        }
-
-        pub fn chat_call_count(&self) -> usize {
-            self.chat_calls.lock().unwrap().len()
-        }
-
-        pub fn last_chat_call(&self) -> Option<Vec<ChatMessage>> {
-            self.chat_calls.lock().unwrap().last().cloned()
-        }
-
-        pub fn canned_embed(dim: usize, count: usize, model: &str) -> EmbedResult {
-            EmbedResult {
-                model: model.to_string(),
-                embeddings: (0..count).map(|_| Embedding(vec![0.1; dim])).collect(),
-            }
-        }
-    }
-
-    impl Provider for MockProvider {
-        fn embed<'a>(
-            &'a self,
-            texts: &'a [String],
-        ) -> Pin<Box<dyn Future<Output = Result<EmbedResult, LlmError>> + Send + 'a>> {
-            self.embed_calls.lock().unwrap().push(texts.to_vec());
-            let reply = self
-                .embed_replies
-                .lock()
-                .unwrap()
-                .pop()
-                .unwrap_or_else(|| Err(LlmError::Provider("no canned embed reply".into())));
-            Box::pin(async move { reply })
-        }
-
-        fn chat<'a>(
-            &'a self,
-            messages: &'a [ChatMessage],
-        ) -> Pin<Box<dyn Future<Output = Result<ChatResponse, LlmError>> + Send + 'a>> {
-            self.chat_calls.lock().unwrap().push(messages.to_vec());
-            let reply = self
-                .chat_replies
-                .lock()
-                .unwrap()
-                .pop()
-                .unwrap_or_else(|| Err(LlmError::Provider("no canned chat reply".into())));
-            Box::pin(async move { reply })
-        }
-    }
-}
+use super::error::LlmError;
 
 #[cfg(test)]
 mod tests {
-    use super::mock::MockProvider;
     use super::*;
 
-    #[tokio::test]
-    async fn retry_succeeds_after_two_transient_errors() {
-        let mock = MockProvider::new();
-        // pushed in reverse: pop yields Ok first if we want Ok last → push Ok last (top of stack)
-        // We want order: Transient, Transient, Ok. Stack pop is LIFO, so push Ok, Transient, Transient.
-        mock.push_chat(Ok(ChatResponse { model: "m".into(), content: "ok".into() }));
-        mock.push_chat(Err(LlmError::Transient("t2".into())));
-        mock.push_chat(Err(LlmError::Transient("t1".into())));
-
-        let msgs = vec![ChatMessage { role: Role::User, content: "hi".into() }];
-        let out = retry(3, || mock.chat(&msgs)).await.unwrap();
-
-        assert_eq!(out.content, "ok");
-        assert_eq!(mock.chat_call_count(), 3);
-    }
-
-    #[tokio::test]
-    async fn retry_returns_provider_error_immediately() {
-        let mock = MockProvider::new();
-        mock.push_chat(Err(LlmError::Provider("boom".into())));
-
-        let msgs = vec![ChatMessage { role: Role::User, content: "hi".into() }];
-        let err = retry(3, || mock.chat(&msgs)).await.unwrap_err();
-
-        assert!(matches!(err, LlmError::Provider(_)));
-        assert_eq!(mock.chat_call_count(), 1);
-    }
-
-    #[tokio::test]
-    async fn retry_exhausts_returns_last_transient() {
-        let mock = MockProvider::new();
-        mock.push_chat(Err(LlmError::Transient("t3".into())));
-        mock.push_chat(Err(LlmError::Transient("t2".into())));
-        mock.push_chat(Err(LlmError::Transient("t1".into())));
-
-        let msgs = vec![ChatMessage { role: Role::User, content: "hi".into() }];
-        let err = retry(3, || mock.chat(&msgs)).await.unwrap_err();
-
-        assert!(matches!(err, LlmError::Transient(_)));
-        assert_eq!(mock.chat_call_count(), 3);
+    fn write(dir: &Path, rel: &str, body: &str) {
+        let path = dir.join(rel);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, body).unwrap();
     }
 
     #[test]
-    fn build_provider_rejects_unknown() {
-        let mut cfg = LlmConfig::default();
-        cfg.provider = "no-such".into();
-        // we cannot actually construct DeepSeek without the env var, so test
-        // only the unknown branch here.
-        let err = build_provider(&cfg).unwrap_err();
-        assert!(matches!(err, LlmError::UnknownProvider(_)));
-    }
-}
-```
+    fn provider_specific_template_wins_over_default() {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "per_user.md", "default body");
+        write(dir.path(), "deepseek/per_user.md", "deepseek body");
 
-Note: `deepseek` is referenced in `build_provider` and as a submodule — task 5 creates it. Until then this file won't compile, so task 5 is the next step.
-
-- [ ] **Step 2: Add `pub mod provider;` to `src/llm.rs`**
-
-Add immediately after the existing `pub mod session;` line:
-
-```rust
-pub mod provider;
-```
-
-- [ ] **Step 3: Do NOT build yet** — the `deepseek` submodule comes next.
-
-- [ ] **Step 4: Stage the changes (commit after task 5 passes)**
-
-(Do not commit yet — wait until DeepSeek lands.)
-
----
-
-## Task 5: DeepSeek provider implementation
-
-**Files:**
-- Create: `src/llm/provider/deepseek.rs`
-
-- [ ] **Step 1: Write the file**
-
-```rust
-//! DeepSeek provider — OpenAI-compatible HTTP API.
-
-use std::future::Future;
-use std::pin::Pin;
-use std::time::Duration;
-
-use reqwest::{Client, StatusCode};
-use serde::{Deserialize, Serialize};
-use tracing::trace;
-
-use crate::llm::config::LlmConfig;
-use crate::llm::provider::{ChatMessage, ChatResponse, Provider, Role};
-use crate::llm::{EmbedResult, Embedding, LlmError};
-
-pub struct DeepSeekProvider {
-    http: Client,
-    base_url: String,
-    api_key: String,
-    chat_model: String,
-    embedding_model: String,
-}
-
-impl DeepSeekProvider {
-    pub fn new(config: &LlmConfig) -> Result<Self, LlmError> {
-        let api_key = std::env::var(&config.api_key_env).map_err(|_| {
-            LlmError::Config(format!(
-                "environment variable {} is not set",
-                config.api_key_env
-            ))
-        })?;
-        let http = Client::builder()
-            .timeout(Duration::from_secs(config.request_timeout_secs))
-            .build()
-            .map_err(|e| LlmError::Config(format!("reqwest client build failed: {}", e)))?;
-        Ok(Self {
-            http,
-            base_url: config.base_url.clone(),
-            api_key,
-            chat_model: config.model.clone(),
-            embedding_model: config.embedding_model.clone(),
-        })
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Wire formats
-// ---------------------------------------------------------------------------
-
-#[derive(Serialize)]
-struct EmbedRequest<'a> {
-    model: &'a str,
-    input: &'a [String],
-}
-
-#[derive(Deserialize)]
-struct EmbedResponseData {
-    embedding: Vec<f32>,
-}
-
-#[derive(Deserialize)]
-struct EmbedResponse {
-    model: String,
-    data: Vec<EmbedResponseData>,
-}
-
-#[derive(Serialize)]
-struct ChatRequest<'a> {
-    model: &'a str,
-    messages: Vec<ChatRequestMessage<'a>>,
-    stream: bool,
-}
-
-#[derive(Serialize)]
-struct ChatRequestMessage<'a> {
-    role: &'a str,
-    content: &'a str,
-}
-
-#[derive(Deserialize)]
-struct ChatResponseRaw {
-    model: String,
-    choices: Vec<ChatChoice>,
-}
-
-#[derive(Deserialize)]
-struct ChatChoice {
-    message: ChatChoiceMessage,
-}
-
-#[derive(Deserialize)]
-struct ChatChoiceMessage {
-    content: String,
-}
-
-fn role_str(r: Role) -> &'static str {
-    match r {
-        Role::System => "system",
-        Role::User => "user",
-        Role::Assistant => "assistant",
-    }
-}
-
-async fn map_status(resp: reqwest::Response) -> Result<reqwest::Response, LlmError> {
-    let status = resp.status();
-    if status.is_success() {
-        return Ok(resp);
-    }
-    let body = resp.text().await.unwrap_or_default();
-    let excerpt = if body.len() > 512 { &body[..512] } else { &body };
-    if status.is_server_error() || status == StatusCode::TOO_MANY_REQUESTS {
-        Err(LlmError::Transient(format!("{}: {}", status, excerpt)))
-    } else {
-        Err(LlmError::Provider(format!("{}: {}", status, excerpt)))
-    }
-}
-
-fn map_reqwest(e: reqwest::Error) -> LlmError {
-    if e.is_timeout() || e.is_connect() {
-        LlmError::Transient(e.to_string())
-    } else {
-        LlmError::Provider(e.to_string())
-    }
-}
-
-impl Provider for DeepSeekProvider {
-    fn embed<'a>(
-        &'a self,
-        texts: &'a [String],
-    ) -> Pin<Box<dyn Future<Output = Result<EmbedResult, LlmError>> + Send + 'a>> {
-        Box::pin(async move {
-            let url = format!("{}/v1/embeddings", self.base_url);
-            trace!(url, n = texts.len(), "deepseek embed");
-            let resp = self
-                .http
-                .post(&url)
-                .bearer_auth(&self.api_key)
-                .json(&EmbedRequest {
-                    model: &self.embedding_model,
-                    input: texts,
-                })
-                .send()
-                .await
-                .map_err(map_reqwest)?;
-            let resp = map_status(resp).await?;
-            let parsed: EmbedResponse = resp.json().await.map_err(map_reqwest)?;
-            Ok(EmbedResult {
-                model: parsed.model,
-                embeddings: parsed
-                    .data
-                    .into_iter()
-                    .map(|d| Embedding(d.embedding))
-                    .collect(),
-            })
-        })
+        let out = load_template(dir.path(), "deepseek", TemplateKind::PerUser).unwrap();
+        assert_eq!(out, "deepseek body");
     }
 
-    fn chat<'a>(
-        &'a self,
-        messages: &'a [ChatMessage],
-    ) -> Pin<Box<dyn Future<Output = Result<ChatResponse, LlmError>> + Send + 'a>> {
-        Box::pin(async move {
-            let url = format!("{}/v1/chat/completions", self.base_url);
-            trace!(url, n = messages.len(), "deepseek chat");
-            let body = ChatRequest {
-                model: &self.chat_model,
-                messages: messages
-                    .iter()
-                    .map(|m| ChatRequestMessage {
-                        role: role_str(m.role),
-                        content: &m.content,
-                    })
-                    .collect(),
-                stream: false,
-            };
-            let resp = self
-                .http
-                .post(&url)
-                .bearer_auth(&self.api_key)
-                .json(&body)
-                .send()
-                .await
-                .map_err(map_reqwest)?;
-            let resp = map_status(resp).await?;
-            let parsed: ChatResponseRaw = resp.json().await.map_err(map_reqwest)?;
-            let content = parsed
-                .choices
-                .into_iter()
-                .next()
-                .ok_or_else(|| LlmError::Provider("chat response had no choices".into()))?
-                .message
-                .content;
-            Ok(ChatResponse {
-                model: parsed.model,
-                content,
-            })
-        })
-    }
-}
+    #[test]
+    fn falls_back_to_default_template() {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "overall.md", "default overall");
 
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
-
-#[cfg(test)]
-mod tests {
-    use serde_json::json;
-    use wiremock::matchers::{method, path};
-    use wiremock::{Mock, MockServer, ResponseTemplate};
-
-    use super::*;
-
-    fn config_for(server: &MockServer) -> LlmConfig {
-        // SAFETY: tests are single-threaded per cfg unless run with --test-threads, but
-        // each test sets its own var key. Use a stable key shared by all tests here.
-        unsafe { std::env::set_var("DEEPSEEK_API_KEY", "test-key") };
-        LlmConfig {
-            provider: "deepseek".into(),
-            api_key_env: "DEEPSEEK_API_KEY".into(),
-            model: "deepseek-chat".into(),
-            embedding_model: "deepseek-embedding".into(),
-            embedding_dim: Some(3),
-            session_idle_timeout_secs: 60,
-            max_retries: 3,
-            request_timeout_secs: 5,
-            base_url: server.uri(),
-        }
+        let out = load_template(dir.path(), "deepseek", TemplateKind::Overall).unwrap();
+        assert_eq!(out, "default overall");
     }
 
-    #[tokio::test]
-    async fn embed_happy_path() {
-        let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(path("/v1/embeddings"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "model": "deepseek-embedding",
-                "data": [
-                    { "embedding": [0.1, 0.2, 0.3] },
-                    { "embedding": [0.4, 0.5, 0.6] }
-                ]
-            })))
-            .mount(&server)
-            .await;
-
-        let p = DeepSeekProvider::new(&config_for(&server)).unwrap();
-        let out = p
-            .embed(&["a".to_string(), "b".to_string()])
-            .await
-            .unwrap();
-
-        assert_eq!(out.model, "deepseek-embedding");
-        assert_eq!(out.embeddings.len(), 2);
-        assert_eq!(out.embeddings[0].0, vec![0.1, 0.2, 0.3]);
-    }
-
-    #[tokio::test]
-    async fn chat_happy_path() {
-        let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(path("/v1/chat/completions"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "model": "deepseek-chat",
-                "choices": [{ "message": { "content": "hello back" } }]
-            })))
-            .mount(&server)
-            .await;
-
-        let p = DeepSeekProvider::new(&config_for(&server)).unwrap();
-        let out = p
-            .chat(&[ChatMessage { role: Role::User, content: "hi".into() }])
-            .await
-            .unwrap();
-
-        assert_eq!(out.model, "deepseek-chat");
-        assert_eq!(out.content, "hello back");
-    }
-
-    #[tokio::test]
-    async fn http_429_maps_to_transient() {
-        let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(path("/v1/embeddings"))
-            .respond_with(ResponseTemplate::new(429).set_body_string("slow down"))
-            .mount(&server)
-            .await;
-
-        let p = DeepSeekProvider::new(&config_for(&server)).unwrap();
-        let err = p.embed(&["x".to_string()]).await.unwrap_err();
-        assert!(matches!(err, LlmError::Transient(_)));
-    }
-
-    #[tokio::test]
-    async fn http_400_maps_to_provider() {
-        let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(path("/v1/embeddings"))
-            .respond_with(ResponseTemplate::new(400).set_body_string("bad input"))
-            .mount(&server)
-            .await;
-
-        let p = DeepSeekProvider::new(&config_for(&server)).unwrap();
-        let err = p.embed(&["x".to_string()]).await.unwrap_err();
-        assert!(matches!(err, LlmError::Provider(_)));
-    }
-
-    #[tokio::test]
-    async fn missing_env_var_returns_config_error() {
-        unsafe { std::env::remove_var("DEEPSEEK_API_KEY_MISSING") };
-        let mut cfg = LlmConfig::default();
-        cfg.api_key_env = "DEEPSEEK_API_KEY_MISSING".into();
-        let err = DeepSeekProvider::new(&cfg).unwrap_err();
+    #[test]
+    fn missing_template_is_a_config_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let err = load_template(dir.path(), "deepseek", TemplateKind::PerUser).unwrap_err();
         assert!(matches!(err, LlmError::Config(_)));
     }
 }
 ```
 
-- [ ] **Step 2: Build the crate**
+- [ ] **Step 3: Run test to verify it fails**
 
-Run: `cargo build`
-Expected: success.
+Run: `cargo test -p clawchorus --lib template::`
+Expected: FAIL — compile error, `TemplateKind` and `load_template` are undefined.
 
-- [ ] **Step 3: Run provider tests**
+- [ ] **Step 4: Write the implementation**
 
-Run: `cargo test --lib llm::provider`
-Expected: all pass (including the deepseek wiremock tests and the retry tests from task 4).
+In `src/llm/template.rs`, insert above the `#[cfg(test)]` module:
 
-- [ ] **Step 4: `cargo fmt`**
+```rust
+/// Which synthesis prompt a task uses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TemplateKind {
+    PerUser,
+    Overall,
+}
 
-- [ ] **Step 5: Commit (covers tasks 4 and 5)**
+impl TemplateKind {
+    fn filename(self) -> &'static str {
+        match self {
+            TemplateKind::PerUser => "per_user.md",
+            TemplateKind::Overall => "overall.md",
+        }
+    }
+}
+
+/// Load the synthesis prompt template for `(provider_name, kind)`.
+///
+/// Resolution: try `{prompts_dir}/{provider_name}/{kind}.md`; if that file is
+/// absent, fall back to `{prompts_dir}/{kind}.md`. The file is read fresh on
+/// every call so edits take effect without a restart. A missing template
+/// returns [`LlmError::Config`].
+pub fn load_template(
+    prompts_dir: &Path,
+    provider_name: &str,
+    kind: TemplateKind,
+) -> Result<String, LlmError> {
+    let specific = prompts_dir.join(provider_name).join(kind.filename());
+    let path = if specific.is_file() {
+        specific
+    } else {
+        prompts_dir.join(kind.filename())
+    };
+    std::fs::read_to_string(&path)
+        .map_err(|e| LlmError::Config(format!("prompt template {}: {}", path.display(), e)))
+}
+```
+
+- [ ] **Step 5: Run test to verify it passes**
+
+Run: `cargo test -p clawchorus --lib template::`
+Expected: PASS — all three template tests.
+
+- [ ] **Step 6: Create the default template files**
+
+Create `prompts/per_user.md`:
+
+```markdown
+You are a memory synthesizer for a single user. You maintain a running,
+deduplicated summary of everything that matters about this user's work,
+decisions, and knowledge.
+
+You will receive the current summary (if any) followed by new or changed
+source documents. Fold the new information into the summary: add what is
+new, update what changed, and drop nothing that still matters. Resolve
+contradictions in favor of the most recent document.
+
+Reply with the complete updated summary as Markdown, and nothing else.
+```
+
+Create `prompts/overall.md`:
+
+```markdown
+You are a memory synthesizer for an organization. You maintain a running,
+cross-user summary that captures shared knowledge, overlapping work, and
+team-wide themes.
+
+You will receive the current overall summary (if any) followed by updated
+per-user summaries. Fold them together: highlight what is common across
+users, surface connections between their work, and keep individual detail
+only where it matters organization-wide.
+
+Reply with the complete updated overall summary as Markdown, and nothing else.
+```
+
+- [ ] **Step 7: Format and commit**
 
 ```bash
-git add src/llm.rs src/llm/provider.rs src/llm/provider/deepseek.rs
-git commit -m "feat(llm): provider trait, retry helper, DeepSeek implementation"
+cargo fmt
+git add src/llm.rs src/llm/template.rs prompts/per_user.md prompts/overall.md
+git commit -m "feat(llm): add prompt template module and default templates"
 ```
 
 ---
 
-## Task 6: Refactor `LlmService` to hold `Arc<dyn Provider>`
+## Task 4: `Embedder` actor
 
 **Files:**
-- Modify: `src/llm.rs`
+- Create: `src/llm/embedder.rs`
+- Modify: `src/llm.rs` (register the module)
+- Test: `src/llm/embedder.rs` (test module)
 
-- [ ] **Step 1: Replace the file contents**
+- [ ] **Step 1: Register the module**
+
+In `src/llm.rs`, add after `pub mod config;`:
 
 ```rust
-//! LLM Service Actor — handles embedding and conversation sessions.
-//!
-//! Sibling of Memory Manager, supervised by the top-level Manager.
+pub mod embedder;
+```
 
-pub mod config;
-pub mod error;
-pub mod provider;
-pub mod session;
+- [ ] **Step 2: Write the failing test**
+
+Create `src/llm/embedder.rs`:
+
+```rust
+//! Embedder actor — long-lived child of `LlmService`. Owns `provider.embed`
+//! so embedding is fully isolated from synthesis.
 
 use std::sync::Arc;
-use std::time::Duration;
 
-use acktor::message::FutureMessageResult;
-use acktor::{Actor, Address, Context, Handler, Message};
+use acktor::{Actor, Context, Handler, message::FutureMessageResult};
 use tracing::trace;
 
-use crate::llm::config::LlmConfig;
-pub use crate::llm::error::LlmError;
-use crate::llm::provider::Provider;
-use crate::llm::session::Session;
-
-/// A single embedding vector.
-#[derive(Debug, Clone)]
-pub struct Embedding(pub Vec<f32>);
-
-/// Result of an embedding request.
-#[derive(Debug, Clone)]
-pub struct EmbedResult {
-    pub model: String,
-    pub embeddings: Vec<Embedding>,
-}
-
-/// Embed a batch of text strings, returning one [`Embedding`] per input.
-#[derive(Debug, Clone, Message)]
-#[result_type(Result<EmbedResult, LlmError>)]
-pub struct Embed {
-    pub texts: Vec<String>,
-}
-
-/// Open a new conversation session. Reply is the spawned `Session` actor's address.
-#[derive(Debug, Clone, Message)]
-#[result_type(Result<Address<Session>, LlmError>)]
-pub struct StartSession;
-
-pub struct LlmService {
-    config: LlmConfig,
-    provider: Arc<dyn Provider>,
-}
-
-impl LlmService {
-    pub fn new(config: LlmConfig, provider: Arc<dyn Provider>) -> Self {
-        Self { config, provider }
-    }
-}
-
-impl Actor for LlmService {
-    type Context = Context<Self>;
-    type Error = LlmError;
-}
-
-impl Handler<Embed> for LlmService {
-    type Result = FutureMessageResult<Embed>;
-
-    async fn handle(
-        &mut self,
-        msg: Embed,
-        _ctx: &mut Self::Context,
-    ) -> FutureMessageResult<Embed> {
-        trace!("Handle command {:?}", msg);
-        let provider = self.provider.clone();
-        let max_retries = self.config.max_retries;
-        FutureMessageResult::new(async move {
-            provider::retry(max_retries, || provider.embed(&msg.texts)).await
-        })
-    }
-}
-
-impl Handler<StartSession> for LlmService {
-    type Result = FutureMessageResult<StartSession>;
-
-    async fn handle(
-        &mut self,
-        msg: StartSession,
-        _ctx: &mut Self::Context,
-    ) -> FutureMessageResult<StartSession> {
-        trace!("Handle command {:?}", msg);
-        let provider = self.provider.clone();
-        let model = self.config.model.clone();
-        let idle = Duration::from_secs(self.config.session_idle_timeout_secs);
-        let max_retries = self.config.max_retries;
-        FutureMessageResult::new(async move {
-            let (addr, _handle) = Session::new(provider, model, idle, max_retries)
-                .start("session")
-                .map_err(|e| LlmError::Actor(e.to_string()))?;
-            Ok(addr)
-        })
-    }
-}
+use super::Embed;
+use super::error::LlmError;
+use super::provider::{self, Provider};
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::llm::Embed;
     use crate::llm::provider::mock::MockProvider;
-    use crate::llm::provider::{ChatMessage, ChatResponse, Role};
-
-    fn cfg() -> LlmConfig {
-        let mut c = LlmConfig::default();
-        c.session_idle_timeout_secs = 60;
-        c
-    }
 
     #[tokio::test]
-    async fn embed_returns_mock_vectors() {
+    async fn embedder_returns_mock_vectors() {
         let mock = Arc::new(MockProvider::new());
         mock.push_embed(Ok(MockProvider::canned_embed(3, 2, "mock-emb")));
 
-        let svc = LlmService::new(cfg(), mock.clone());
-        let (addr, _h) = svc.start("llm-test").unwrap();
+        let (addr, _h) = Embedder::new(mock.clone(), 3).start("embedder-test").unwrap();
 
         let out = addr
             .send(Embed {
@@ -974,196 +508,110 @@ mod tests {
         assert_eq!(out.model, "mock-emb");
         assert_eq!(mock.embed_call_count(), 1);
     }
+}
+```
 
-    #[tokio::test]
-    async fn start_session_returns_working_address() {
-        let mock = Arc::new(MockProvider::new());
-        mock.push_chat(Ok(ChatResponse {
-            model: "mock-chat".into(),
-            content: "hello".into(),
-        }));
+- [ ] **Step 3: Run test to verify it fails**
 
-        let svc = LlmService::new(cfg(), mock.clone());
-        let (addr, _h) = svc.start("llm-test").unwrap();
+Run: `cargo test -p clawchorus --lib embedder::`
+Expected: FAIL — compile error, `Embedder` is undefined.
 
-        let sess = addr
-            .send(StartSession)
-            .await
-            .unwrap()
-            .await
-            .unwrap()
-            .unwrap();
+- [ ] **Step 4: Write the implementation**
 
-        let reply = sess
-            .send(crate::llm::session::SendMessage {
-                content: "hi".into(),
-            })
-            .await
-            .unwrap()
-            .await
-            .unwrap()
-            .unwrap();
+In `src/llm/embedder.rs`, insert above the `#[cfg(test)]` module:
 
-        assert_eq!(reply, "hello");
-        let last = mock.last_chat_call().unwrap();
-        assert_eq!(last.len(), 1);
-        assert_eq!(last[0].role, Role::User);
-        assert_eq!(last[0].content, "hi");
+```rust
+pub struct Embedder {
+    provider: Arc<dyn Provider>,
+    max_retries: u32,
+}
+
+impl Embedder {
+    pub fn new(provider: Arc<dyn Provider>, max_retries: u32) -> Self {
+        Self {
+            provider,
+            max_retries,
+        }
+    }
+}
+
+impl Actor for Embedder {
+    type Context = Context<Self>;
+    type Error = LlmError;
+}
+
+impl Handler<Embed> for Embedder {
+    type Result = FutureMessageResult<Embed>;
+
+    async fn handle(&mut self, msg: Embed, _ctx: &mut Self::Context) -> FutureMessageResult<Embed> {
+        trace!("Handle command {:?}", msg);
+        let provider = self.provider.clone();
+        let max_retries = self.max_retries;
+        FutureMessageResult::new(async move {
+            provider::retry(max_retries, || provider.embed(&msg.texts)).await
+        })
     }
 }
 ```
 
-- [ ] **Step 2: Do not build yet** — Session signature changes in task 7. Continue.
+- [ ] **Step 5: Run test to verify it passes**
+
+Run: `cargo test -p clawchorus --lib embedder::`
+Expected: PASS.
+
+- [ ] **Step 6: Format and commit**
+
+```bash
+cargo fmt
+git add src/llm.rs src/llm/embedder.rs
+git commit -m "feat(llm): add Embedder actor"
+```
 
 ---
 
-## Task 7: Convert `Session` to `CronContext` + history + retry
+## Task 5: `SynthesisTask` actor + `Synthesize` message
 
 **Files:**
-- Modify: `src/llm/session.rs`
+- Create: `src/llm/synthesis.rs`
+- Modify: `src/llm.rs` (register the module)
+- Test: `src/llm/synthesis.rs` (test module)
 
-- [ ] **Step 1: Replace the file contents**
+- [ ] **Step 1: Register the module**
+
+In `src/llm.rs`, add after `pub mod embedder;`:
 
 ```rust
-//! Conversation session actor — child of `LlmService`, one per logical
-//! conversation. Owns the full chat transcript and self-terminates on idle
-//! via acktor's CronActor.
+pub mod synthesis;
+```
 
+- [ ] **Step 2: Write the failing tests**
+
+Create `src/llm/synthesis.rs`:
+
+```rust
+//! Synthesis — `SynthesisTask` actor plus its public message and value types.
+//!
+//! One long-lived `SynthesisTask` exists per `SynthesisTarget`. It owns the
+//! conversation context for that target so successive cool-down cycles refine
+//! a synthesis instead of rebuilding it. It hot-reloads its prompt template,
+//! reseeds an empty history from a caller-supplied prior summary, and clears
+//! its history once it grows past a character budget.
+
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use acktor::cron::{CronActor, CronContext};
-use acktor::message::FutureMessageResult;
-use acktor::{Actor, ActorContext, Handler, Message, Signal};
+use acktor::{
+    Actor, ActorContext, Handler, Message, Signal,
+    cron::{CronActor, CronContext},
+    message::FutureMessageResult,
+};
 use tokio::time::Instant;
-use tracing::{trace, warn};
+use tracing::trace;
 
-use crate::llm::LlmError;
-use crate::llm::provider::{ChatMessage, Provider, Role, retry};
-
-/// Send a user-authored message into the session. Returns the assistant reply.
-#[derive(Debug, Clone, Message)]
-#[result_type(Result<String, LlmError>)]
-pub struct SendMessage {
-    pub content: String,
-}
-
-/// Gracefully stop the session.
-#[derive(Debug, Clone, Message)]
-#[result_type(Result<(), LlmError>)]
-pub struct StopSession;
-
-pub struct Session {
-    provider: Arc<dyn Provider>,
-    model: String,
-    history: Vec<ChatMessage>,
-    idle_timeout: Duration,
-    last_activity: Instant,
-    max_retries: u32,
-}
-
-impl Session {
-    pub fn new(
-        provider: Arc<dyn Provider>,
-        model: String,
-        idle_timeout: Duration,
-        max_retries: u32,
-    ) -> Self {
-        Self {
-            provider,
-            model,
-            history: Vec::new(),
-            idle_timeout,
-            last_activity: Instant::now(),
-            max_retries,
-        }
-    }
-
-    /// Configured chat model (mainly for introspection / tests).
-    pub fn model(&self) -> &str {
-        &self.model
-    }
-}
-
-impl Actor for Session {
-    type Context = CronContext<Self>;
-    type Error = LlmError;
-}
-
-impl CronActor for Session {
-    async fn task(&mut self, ctx: &mut Self::Context) -> Result<Duration, LlmError> {
-        let elapsed = self.last_activity.elapsed();
-        if elapsed >= self.idle_timeout {
-            trace!("Session idle for {:?}, terminating", elapsed);
-            let _ = ctx.address().do_send(Signal::Terminate).await;
-            // Returned duration is effectively unused after Terminate is processed.
-            return Ok(Duration::from_secs(3600));
-        }
-        let remaining = self.idle_timeout.saturating_sub(elapsed);
-        Ok(remaining.max(Duration::from_secs(1)))
-    }
-}
-
-impl Handler<SendMessage> for Session {
-    type Result = FutureMessageResult<SendMessage>;
-
-    async fn handle(
-        &mut self,
-        msg: SendMessage,
-        _ctx: &mut Self::Context,
-    ) -> FutureMessageResult<SendMessage> {
-        trace!("Handle command {:?}", msg);
-        self.history.push(ChatMessage {
-            role: Role::User,
-            content: msg.content,
-        });
-        self.last_activity = Instant::now();
-
-        // Clone what the future needs; we'll mutate `self.history` after.
-        let provider = self.provider.clone();
-        let max_retries = self.max_retries;
-        let history_snapshot = self.history.clone();
-
-        // We need to mutate `self.history` and `self.last_activity` AFTER the
-        // call returns. Run the future inline (the actor's mailbox is held by
-        // the wrapping FutureMessageResult; we capture self via &mut here is
-        // not possible — so we run the call synchronously within handle and
-        // return a ready future).
-        let result = retry(max_retries, || provider.chat(&history_snapshot)).await;
-
-        match result {
-            Ok(resp) => {
-                self.history.push(ChatMessage {
-                    role: Role::Assistant,
-                    content: resp.content.clone(),
-                });
-                self.last_activity = Instant::now();
-                let content = resp.content;
-                FutureMessageResult::new(async move { Ok(content) })
-            }
-            Err(e) => FutureMessageResult::new(async move { Err(e) }),
-        }
-    }
-}
-
-impl Handler<StopSession> for Session {
-    type Result = FutureMessageResult<StopSession>;
-
-    async fn handle(
-        &mut self,
-        msg: StopSession,
-        ctx: &mut Self::Context,
-    ) -> FutureMessageResult<StopSession> {
-        trace!("Handle command {:?}", msg);
-        let addr = ctx.address().clone();
-        FutureMessageResult::new(async move {
-            if let Err(e) = addr.do_send(Signal::Terminate).await {
-                warn!("Session terminate failed: {}", e);
-            }
-            Ok(())
-        })
-    }
-}
+use super::error::LlmError;
+use super::provider::{ChatMessage, Provider, Role, retry};
+use super::template::{TemplateKind, load_template};
 
 #[cfg(test)]
 mod tests {
@@ -1171,246 +619,1185 @@ mod tests {
     use crate::llm::provider::ChatResponse;
     use crate::llm::provider::mock::MockProvider;
 
-    fn mock() -> Arc<MockProvider> {
-        Arc::new(MockProvider::new())
+    /// Build a temp prompts dir holding a `per_user.md` template.
+    fn prompts_dir() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("per_user.md"), "SYSTEM PROMPT").unwrap();
+        dir
+    }
+
+    fn task(mock: Arc<MockProvider>, dir: &tempfile::TempDir, max_chars: usize) -> SynthesisTask {
+        SynthesisTask::new(
+            mock,
+            TemplateKind::PerUser,
+            dir.path().to_path_buf(),
+            Duration::from_secs(60),
+            3,
+            max_chars,
+        )
+    }
+
+    fn doc(name: &str, content: &str) -> SourceDoc {
+        SourceDoc {
+            name: name.into(),
+            content: content.into(),
+        }
     }
 
     #[tokio::test]
-    async fn send_message_appends_history_and_returns_reply() {
-        let m = mock();
-        m.push_chat(Ok(ChatResponse {
-            model: "mock".into(),
-            content: "hello back".into(),
+    async fn reseeds_empty_history_from_prior_summary() {
+        let mock = Arc::new(MockProvider::new());
+        let dir = prompts_dir();
+        let (addr, _h) = task(mock.clone(), &dir, 1_000_000).start("synth-test").unwrap();
+
+        addr.send(Synthesize {
+            target: SynthesisTarget::User("alice".into()),
+            prior_summary: Some("PRIOR-SUMMARY".into()),
+            sources: vec![doc("a.md", "new content")],
+        })
+        .await
+        .unwrap()
+        .await
+        .unwrap()
+        .unwrap();
+
+        let call = mock.last_chat_call().unwrap();
+        // system + reseed turn + sources turn
+        assert_eq!(call[0].role, Role::System);
+        assert_eq!(call[0].content, "SYSTEM PROMPT");
+        assert!(call.iter().any(|m| m.content.contains("PRIOR-SUMMARY")));
+        assert!(call.iter().any(|m| m.content.contains("new content")));
+    }
+
+    #[tokio::test]
+    async fn accumulates_history_across_calls() {
+        let mock = Arc::new(MockProvider::new());
+        mock.push_chat(Ok(ChatResponse {
+            model: "m".into(),
+            content: "reply-2".into(),
+        }));
+        mock.push_chat(Ok(ChatResponse {
+            model: "m".into(),
+            content: "reply-1".into(),
+        }));
+        let dir = prompts_dir();
+        let (addr, _h) = task(mock.clone(), &dir, 1_000_000).start("synth-test").unwrap();
+
+        for (n, text) in [(1, "cycle-1"), (2, "cycle-2")] {
+            addr.send(Synthesize {
+                target: SynthesisTarget::User("alice".into()),
+                prior_summary: None,
+                sources: vec![doc("a.md", text)],
+            })
+            .await
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap();
+            let _ = n;
+        }
+
+        let call = mock.last_chat_call().unwrap();
+        // Second call still carries the first cycle's turns.
+        assert!(call.iter().any(|m| m.content.contains("cycle-1")));
+        assert!(call.iter().any(|m| m.content == "reply-1"));
+        assert!(call.iter().any(|m| m.content.contains("cycle-2")));
+    }
+
+    #[tokio::test]
+    async fn resets_context_when_over_budget() {
+        let mock = Arc::new(MockProvider::new());
+        let dir = prompts_dir();
+        // Budget of 1 char guarantees a reset after the first call.
+        let (addr, _h) = task(mock.clone(), &dir, 1).start("synth-test").unwrap();
+
+        addr.send(Synthesize {
+            target: SynthesisTarget::User("alice".into()),
+            prior_summary: None,
+            sources: vec![doc("a.md", "first")],
+        })
+        .await
+        .unwrap()
+        .await
+        .unwrap()
+        .unwrap();
+
+        addr.send(Synthesize {
+            target: SynthesisTarget::User("alice".into()),
+            prior_summary: Some("RESEED".into()),
+            sources: vec![doc("b.md", "second")],
+        })
+        .await
+        .unwrap()
+        .await
+        .unwrap()
+        .unwrap();
+
+        let call = mock.last_chat_call().unwrap();
+        // History was cleared after call 1, so call 2 reseeds and the
+        // first cycle's content is gone.
+        assert!(call.iter().any(|m| m.content.contains("RESEED")));
+        assert!(!call.iter().any(|m| m.content.contains("first")));
+        assert!(call.iter().any(|m| m.content.contains("second")));
+    }
+
+    #[tokio::test]
+    async fn missing_template_returns_config_error() {
+        let mock = Arc::new(MockProvider::new());
+        let empty = tempfile::tempdir().unwrap();
+        let (addr, _h) = task(mock, &empty, 1_000_000).start("synth-test").unwrap();
+
+        let err = addr
+            .send(Synthesize {
+                target: SynthesisTarget::User("alice".into()),
+                prior_summary: None,
+                sources: vec![doc("a.md", "x")],
+            })
+            .await
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap_err();
+        assert!(matches!(err, LlmError::Config(_)));
+    }
+
+    #[tokio::test]
+    async fn idle_timeout_terminates_task() {
+        let mock = Arc::new(MockProvider::new());
+        let dir = prompts_dir();
+        let t = SynthesisTask::new(
+            mock,
+            TemplateKind::PerUser,
+            dir.path().to_path_buf(),
+            Duration::from_millis(100),
+            3,
+            1_000_000,
+        );
+        let (_addr, handle) = t.start("synth-idle").unwrap();
+        let res = tokio::time::timeout(Duration::from_millis(800), handle).await;
+        assert!(res.is_ok(), "task should self-terminate on idle");
+    }
+}
+```
+
+- [ ] **Step 3: Run tests to verify they fail**
+
+Run: `cargo test -p clawchorus --lib synthesis::`
+Expected: FAIL — compile error, `SynthesisTask`, `Synthesize`, `SynthesisTarget`, `SourceDoc` undefined.
+
+- [ ] **Step 4: Write the value types and message**
+
+In `src/llm/synthesis.rs`, insert above the `#[cfg(test)]` module:
+
+```rust
+/// Which synthesis a `Synthesize` request targets. Identifies both the
+/// long-lived task to route to and the prompt template kind.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum SynthesisTarget {
+    /// Per-user synthesis; the `String` is the username.
+    User(String),
+    /// Cross-user synthesis.
+    Overall,
+}
+
+impl SynthesisTarget {
+    /// Prompt template kind for this target.
+    pub fn template_kind(&self) -> TemplateKind {
+        match self {
+            SynthesisTarget::User(_) => TemplateKind::PerUser,
+            SynthesisTarget::Overall => TemplateKind::Overall,
+        }
+    }
+
+    /// Stable actor label for this target.
+    pub fn label(&self) -> String {
+        match self {
+            SynthesisTarget::User(u) => format!("synth-user-{u}"),
+            SynthesisTarget::Overall => "synth-overall".to_string(),
+        }
+    }
+}
+
+/// One source document fed into a synthesis.
+#[derive(Debug, Clone)]
+pub struct SourceDoc {
+    /// A label for the document, e.g. its relative path.
+    pub name: String,
+    pub content: String,
+}
+
+/// Synthesize `sources` into the target's running summary. `prior_summary`
+/// is the current on-disk summary; it seeds a task whose context is empty
+/// (cold start, after a restart, or after a context reset).
+#[derive(Debug, Message)]
+#[result_type(Result<String, LlmError>)]
+pub struct Synthesize {
+    pub target: SynthesisTarget,
+    pub prior_summary: Option<String>,
+    pub sources: Vec<SourceDoc>,
+}
+
+fn render_sources(sources: &[SourceDoc]) -> String {
+    let mut out = String::from("New or changed documents to fold into the synthesis:\n\n");
+    for doc in sources {
+        out.push_str(&format!("## {}\n\n{}\n\n", doc.name, doc.content));
+    }
+    out
+}
+```
+
+- [ ] **Step 5: Write the `SynthesisTask` actor**
+
+In `src/llm/synthesis.rs`, append after `render_sources` (still above the test module):
+
+```rust
+/// Long-lived per-target synthesis actor. Owns the conversation history for
+/// its target and self-terminates on idle via `CronActor`.
+pub struct SynthesisTask {
+    provider: Arc<dyn Provider>,
+    kind: TemplateKind,
+    prompts_dir: PathBuf,
+    history: Vec<ChatMessage>,
+    idle_timeout: Duration,
+    last_activity: Instant,
+    max_retries: u32,
+    context_max_chars: usize,
+}
+
+impl SynthesisTask {
+    pub fn new(
+        provider: Arc<dyn Provider>,
+        kind: TemplateKind,
+        prompts_dir: PathBuf,
+        idle_timeout: Duration,
+        max_retries: u32,
+        context_max_chars: usize,
+    ) -> Self {
+        Self {
+            provider,
+            kind,
+            prompts_dir,
+            history: Vec::new(),
+            idle_timeout,
+            last_activity: Instant::now(),
+            max_retries,
+            context_max_chars,
+        }
+    }
+}
+
+impl Actor for SynthesisTask {
+    type Context = CronContext<Self>;
+    type Error = LlmError;
+}
+
+impl CronActor for SynthesisTask {
+    async fn task(&mut self, ctx: &mut Self::Context) -> Result<Duration, LlmError> {
+        let elapsed = self.last_activity.elapsed();
+        if elapsed >= self.idle_timeout {
+            trace!("SynthesisTask idle for {:?}, terminating", elapsed);
+            let _ = ctx.address().do_send(Signal::Terminate).await;
+            return Ok(Duration::from_secs(3600));
+        }
+        let remaining = self.idle_timeout.saturating_sub(elapsed);
+        Ok(remaining.max(Duration::from_millis(50)))
+    }
+}
+
+impl Handler<Synthesize> for SynthesisTask {
+    type Result = FutureMessageResult<Synthesize>;
+
+    async fn handle(
+        &mut self,
+        msg: Synthesize,
+        _ctx: &mut Self::Context,
+    ) -> FutureMessageResult<Synthesize> {
+        trace!("Handle command {:?}", msg);
+        self.last_activity = Instant::now();
+
+        // Hot-reload the prompt template every call.
+        let system = match load_template(&self.prompts_dir, self.provider.name(), self.kind) {
+            Ok(t) => t,
+            Err(e) => return FutureMessageResult::new(async move { Err(e) }),
+        };
+
+        // Snapshot history length so a failed call can be rolled back cleanly.
+        let restore_len = self.history.len();
+
+        // Reseed an empty history from the prior summary.
+        if self.history.is_empty() {
+            if let Some(summary) = msg.prior_summary {
+                self.history.push(ChatMessage {
+                    role: Role::User,
+                    content: format!("Current summary so far:\n\n{summary}"),
+                });
+            }
+        }
+
+        // Append the changed sources as a user turn.
+        self.history.push(ChatMessage {
+            role: Role::User,
+            content: render_sources(&msg.sources),
+        });
+
+        // System message is recomputed each call, never stored in history.
+        let mut messages = Vec::with_capacity(self.history.len() + 1);
+        messages.push(ChatMessage {
+            role: Role::System,
+            content: system,
+        });
+        messages.extend(self.history.iter().cloned());
+
+        let provider = self.provider.clone();
+        let result = retry(self.max_retries, || provider.chat(&messages)).await;
+
+        let reply = match result {
+            Ok(resp) => resp.content,
+            Err(e) => {
+                self.history.truncate(restore_len);
+                return FutureMessageResult::new(async move { Err(e) });
+            }
+        };
+
+        self.history.push(ChatMessage {
+            role: Role::Assistant,
+            content: reply.clone(),
+        });
+        self.last_activity = Instant::now();
+
+        // Reset context once it grows past the budget; the next call reseeds.
+        let total: usize = self.history.iter().map(|m| m.content.len()).sum();
+        if total > self.context_max_chars {
+            trace!("synthesis context {} chars over budget, clearing", total);
+            self.history.clear();
+        }
+
+        FutureMessageResult::new(async move { Ok(reply) })
+    }
+}
+```
+
+- [ ] **Step 6: Run tests to verify they pass**
+
+Run: `cargo test -p clawchorus --lib synthesis::`
+Expected: PASS — all five synthesis tests.
+
+- [ ] **Step 7: Format and commit**
+
+```bash
+cargo fmt
+git add src/llm.rs src/llm/synthesis.rs
+git commit -m "feat(llm): add SynthesisTask actor and Synthesize message"
+```
+
+---
+
+## Task 6: Wire `Embedder` + `Synthesize` into `LlmService`
+
+This task rewrites `src/llm.rs`. `StartSession` and the `Session` actor are intentionally **kept** so the crate keeps compiling — they are removed in Task 9.
+
+**Files:**
+- Modify: `src/llm.rs`
+- Modify: `src/manager.rs:56-59`, `src/memory/manager.rs:243-247`, `src/memory/synthesizer.rs:300-306` (the `LlmService::new` call sites)
+
+- [ ] **Step 1: Write the failing test**
+
+In `src/llm.rs`, add to the `tests` module a new test:
+
+```rust
+    #[tokio::test]
+    async fn synthesize_spawns_task_and_returns_reply() {
+        let mock = Arc::new(MockProvider::new());
+        mock.push_chat(Ok(ChatResponse {
+            model: "mock-chat".into(),
+            content: "synth-reply".into(),
         }));
 
-        let session = Session::new(m.clone(), "mock-chat".into(), Duration::from_secs(60), 3);
-        let (addr, _h) = session.start("sess-test").unwrap();
+        let svc = LlmService::new(cfg(), mock.clone()).unwrap();
+        let (addr, _h) = svc.start("llm-test").unwrap();
 
         let reply = addr
-            .send(SendMessage { content: "hi".into() })
+            .send(Synthesize {
+                target: crate::llm::SynthesisTarget::User("alice".into()),
+                prior_summary: None,
+                sources: vec![crate::llm::SourceDoc {
+                    name: "alice/a/daily_note/x.md".into(),
+                    content: "hello".into(),
+                }],
+            })
             .await
             .unwrap()
             .await
             .unwrap()
             .unwrap();
 
-        assert_eq!(reply, "hello back");
-        let last = m.last_chat_call().unwrap();
-        assert_eq!(last.len(), 1);
-        assert_eq!(last[0].content, "hi");
+        assert_eq!(reply, "synth-reply");
     }
+```
 
-    #[tokio::test]
-    async fn multi_turn_sends_full_history() {
-        let m = mock();
-        m.push_chat(Ok(ChatResponse { model: "mock".into(), content: "reply-2".into() }));
-        m.push_chat(Ok(ChatResponse { model: "mock".into(), content: "reply-1".into() }));
+- [ ] **Step 2: Run test to verify it fails**
 
-        let session = Session::new(m.clone(), "mock-chat".into(), Duration::from_secs(60), 3);
-        let (addr, _h) = session.start("sess-test").unwrap();
+Run: `cargo test -p clawchorus --lib synthesize_spawns_task_and_returns_reply`
+Expected: FAIL — compile error, no `Synthesize` / `SynthesisTarget` in `crate::llm`, and `LlmService::new` does not return `Result`.
 
-        let r1 = addr
-            .send(SendMessage { content: "turn-1".into() })
-            .await.unwrap().await.unwrap().unwrap();
-        assert_eq!(r1, "reply-1");
+- [ ] **Step 3: Rewrite the module head of `src/llm.rs`**
 
-        let r2 = addr
-            .send(SendMessage { content: "turn-2".into() })
-            .await.unwrap().await.unwrap().unwrap();
-        assert_eq!(r2, "reply-2");
+Replace lines 1-55 of `src/llm.rs` (the doc comment, imports, module decls, type definitions, `LlmService` struct, and `impl LlmService`) with:
 
-        let last = m.last_chat_call().unwrap();
-        // user-1, assistant-1, user-2 = 3 messages on the second call.
-        assert_eq!(last.len(), 3);
-        assert_eq!(last[0].role, Role::User);
-        assert_eq!(last[0].content, "turn-1");
-        assert_eq!(last[1].role, Role::Assistant);
-        assert_eq!(last[1].content, "reply-1");
-        assert_eq!(last[2].role, Role::User);
-        assert_eq!(last[2].content, "turn-2");
-    }
+```rust
+//! LLM Service Actor — the single entry point for embedding and synthesis.
+//!
+//! Sibling of Memory Manager, supervised by the top-level Manager. It spawns
+//! an `Embedder` child and one long-lived `SynthesisTask` child per target.
 
-    #[tokio::test]
-    async fn stop_session_terminates() {
-        let m = mock();
-        let session = Session::new(m, "mock-chat".into(), Duration::from_secs(60), 3);
-        let (addr, handle) = session.start("sess-stop").unwrap();
+use std::collections::HashMap;
+use std::sync::Arc;
+use std::time::Duration;
 
-        addr.send(StopSession).await.unwrap().await.unwrap().unwrap();
-        let _ = tokio::time::timeout(Duration::from_secs(1), handle).await;
-    }
+use acktor::{
+    Actor, ActorContext, Address, Context, Handler, Message, message::FutureMessageResult,
+};
+use tracing::trace;
 
-    #[tokio::test]
-    async fn idle_timeout_terminates_session() {
-        let m = mock();
-        let session = Session::new(m, "mock-chat".into(), Duration::from_millis(100), 3);
-        let (_addr, handle) = session.start("sess-idle").unwrap();
+use crate::llm::config::LlmConfig;
+use crate::llm::embedder::Embedder;
+use crate::llm::session::Session;
+use crate::llm::synthesis::SynthesisTask;
 
-        // Wait long enough for the cron task to observe idle and terminate.
-        let res = tokio::time::timeout(Duration::from_millis(800), handle).await;
-        assert!(res.is_ok(), "session should have terminated on idle");
+mod error;
+pub use crate::llm::error::LlmError;
+
+pub mod config;
+pub mod embedder;
+pub mod session;
+pub mod synthesis;
+pub mod template;
+
+pub mod provider;
+pub use provider::{Provider, build_provider};
+
+pub use synthesis::{SourceDoc, Synthesize, SynthesisTarget};
+
+/// A single embedding vector.
+#[derive(Debug)]
+pub struct Embedding(pub Vec<f32>);
+
+/// Result of an embedding request.
+#[derive(Debug)]
+pub struct EmbedResult {
+    pub model: String,
+    pub embeddings: Vec<Embedding>,
+}
+
+/// Embed a batch of text strings, returning one [`Embedding`] per input.
+#[derive(Debug, Message)]
+#[result_type(Result<EmbedResult, LlmError>)]
+pub struct Embed {
+    pub texts: Vec<String>,
+}
+
+/// Open a new conversation session. Reply is the spawned `Session` actor's address.
+#[derive(Debug, Message)]
+#[result_type(Result<Address<Session>, LlmError>)]
+pub struct StartSession;
+
+/// Internal: a `SynthesisTask` has terminated (idle), so drop its map entry.
+#[derive(Debug, Message)]
+#[result_type(())]
+struct TaskDied {
+    target: SynthesisTarget,
+}
+
+pub struct LlmService {
+    config: LlmConfig,
+    provider: Arc<dyn Provider>,
+    embedder: Address<Embedder>,
+    tasks: HashMap<SynthesisTarget, Address<SynthesisTask>>,
+}
+
+impl LlmService {
+    /// Build the service, spawning its long-lived `Embedder` child.
+    pub fn new(config: LlmConfig, provider: Arc<dyn Provider>) -> Result<Self, LlmError> {
+        let (embedder, _handle) = Embedder::new(provider.clone(), config.max_retries)
+            .start("embedder")
+            .map_err(|e| LlmError::Actor(e.to_string()))?;
+        Ok(Self {
+            config,
+            provider,
+            embedder,
+            tasks: HashMap::new(),
+        })
     }
 }
 ```
 
-- [ ] **Step 2: Build**
+- [ ] **Step 4: Replace the handlers in `src/llm.rs`**
 
-Run: `cargo build`
-Expected: success.
+Replace the `Handler<Embed>` and `Handler<StartSession>` impl blocks (the old lines 62-95) with:
 
-- [ ] **Step 3: Run LLM tests**
+```rust
+impl Handler<Embed> for LlmService {
+    type Result = FutureMessageResult<Embed>;
 
-Run: `cargo test --lib llm::`
-Expected: all pass.
+    async fn handle(&mut self, msg: Embed, _ctx: &mut Self::Context) -> FutureMessageResult<Embed> {
+        trace!("Handle command {:?}", msg);
+        let embedder = self.embedder.clone();
+        FutureMessageResult::new(async move {
+            embedder
+                .send(msg)
+                .await
+                .map_err(|e| LlmError::Actor(e.to_string()))?
+                .await
+                .map_err(|e| LlmError::Actor(e.to_string()))?
+        })
+    }
+}
 
-- [ ] **Step 4: `cargo fmt`**
+impl Handler<Synthesize> for LlmService {
+    type Result = FutureMessageResult<Synthesize>;
 
-- [ ] **Step 5: Commit (covers tasks 6 + 7)**
+    async fn handle(
+        &mut self,
+        msg: Synthesize,
+        ctx: &mut Self::Context,
+    ) -> FutureMessageResult<Synthesize> {
+        trace!("Handle command {:?}", msg);
+
+        // Get-or-spawn the long-lived task for this target.
+        let task = match self.tasks.get(&msg.target) {
+            Some(addr) => addr.clone(),
+            None => {
+                let target = msg.target.clone();
+                let label = target.label();
+                let new_task = SynthesisTask::new(
+                    self.provider.clone(),
+                    target.template_kind(),
+                    self.config.prompts_dir.clone(),
+                    Duration::from_secs(self.config.synthesis_idle_timeout_secs),
+                    self.config.max_retries,
+                    self.config.synthesis_context_max_chars,
+                );
+                match new_task.start(&label) {
+                    Ok((addr, handle)) => {
+                        // When the task self-terminates on idle, tell ourselves
+                        // so the stale map entry is dropped.
+                        let self_addr = ctx.address().clone();
+                        let dead = target.clone();
+                        tokio::spawn(async move {
+                            let _ = handle.await;
+                            let _ = self_addr.do_send(TaskDied { target: dead }).await;
+                        });
+                        self.tasks.insert(target, addr.clone());
+                        addr
+                    }
+                    Err(e) => {
+                        let err = LlmError::Actor(e.to_string());
+                        return FutureMessageResult::new(async move { Err(err) });
+                    }
+                }
+            }
+        };
+
+        FutureMessageResult::new(async move {
+            task.send(msg)
+                .await
+                .map_err(|e| LlmError::Actor(e.to_string()))?
+                .await
+                .map_err(|e| LlmError::Actor(e.to_string()))?
+        })
+    }
+}
+
+impl Handler<TaskDied> for LlmService {
+    type Result = ();
+
+    async fn handle(&mut self, msg: TaskDied, _ctx: &mut Self::Context) {
+        trace!("Handle command {:?}", msg);
+        self.tasks.remove(&msg.target);
+    }
+}
+
+impl Handler<StartSession> for LlmService {
+    type Result = FutureMessageResult<StartSession>;
+
+    async fn handle(
+        &mut self,
+        msg: StartSession,
+        _ctx: &mut Self::Context,
+    ) -> FutureMessageResult<StartSession> {
+        trace!("Handle command {:?}", msg);
+        let provider = self.provider.clone();
+        let model = self.config.model.clone();
+        let idle = Duration::from_secs(self.config.synthesis_idle_timeout_secs);
+        let max_retries = self.config.max_retries;
+        FutureMessageResult::new(async move {
+            let (addr, _handle) = Session::new(provider, model, idle, max_retries)
+                .start("session")
+                .map_err(|e| LlmError::Actor(e.to_string()))?;
+            Ok(addr)
+        })
+    }
+}
+```
+
+Note: the `Actor for LlmService` impl block (old lines 57-60) stays unchanged between the `impl LlmService` block and the handlers.
+
+- [ ] **Step 5: Fix the `LlmService::new` call sites**
+
+`src/manager.rs:56-59` — change the closure body to return the `Result` directly:
+
+```rust
+        let (llm_addr, llm_handle) = LlmService::create("llm-service", |child_ctx| {
+            child_ctx.set_supervisor(Some(ctx.address().into()));
+            LlmService::new(llm, provider)
+        })?;
+```
+
+`src/memory/manager.rs` — in the `test_llm` helper (around line 243-247), add `.unwrap()`:
+
+```rust
+    fn test_llm() -> Address<LlmService> {
+        let provider = std::sync::Arc::new(crate::llm::provider::mock::MockProvider::new());
+        let llm = LlmService::new(Default::default(), provider).unwrap();
+        let (addr, _handle) = llm.start("llm-test").unwrap();
+        addr
+    }
+```
+
+`src/memory/synthesizer.rs` — in the `boot` test helper (around line 303), add `.unwrap()`:
+
+```rust
+        let (llm, h3) = LlmService::new(Default::default(), provider)
+            .unwrap()
+            .start("l")
+            .unwrap();
+```
+
+`src/llm.rs` tests — the two existing `LlmService::new(cfg(), mock.clone())` lines (in `embed_returns_mock_vectors` and `start_session_returns_working_address`) become `LlmService::new(cfg(), mock.clone()).unwrap()`.
+
+- [ ] **Step 6: Run tests to verify they pass**
+
+Run: `cargo test -p clawchorus --lib && cargo fmt`
+Expected: PASS — including `synthesize_spawns_task_and_returns_reply`. (`start_session_returns_working_address` still passes; removed in Task 9.)
+
+- [ ] **Step 7: Commit**
 
 ```bash
-git add src/llm.rs src/llm/session.rs
-git commit -m "feat(llm): Arc<dyn Provider>, retry, cron-based idle timeout"
+git add src/llm.rs src/manager.rs src/memory/manager.rs src/memory/synthesizer.rs
+git commit -m "feat(llm): wire Embedder and Synthesize into LlmService"
 ```
 
 ---
 
-## Task 8: Wire `build_provider` in `main.rs`
+## Task 7: Synthesis path helpers
+
+`derive_synthesis_path` is kept here so the crate compiles; it is removed in Task 9 after the Synthesizer stops using it.
 
 **Files:**
-- Modify: `src/main.rs`
+- Modify: `src/memory/path.rs`
+- Test: `src/memory/path.rs` (test module)
 
-- [ ] **Step 1: Update the file**
+- [ ] **Step 1: Write the failing test**
 
-Replace the body with:
+In `src/memory/path.rs`, add to the `tests` module:
 
 ```rust
-use acktor::Actor;
-use anyhow::Result;
-use tracing::info;
+    #[test]
+    fn per_user_synthesis_path_has_no_memory_type() {
+        assert_eq!(
+            per_user_synthesis_path("alice"),
+            "alice/_synthesized/summary.md"
+        );
+    }
 
-use clawchorus::{
-    config,
-    llm::{LlmService, provider::build_provider},
-    memory::manager::MemoryManager,
-};
+    #[test]
+    fn overall_synthesis_path_is_top_level() {
+        assert_eq!(overall_synthesis_path(), "_synthesized/summary.md");
+    }
+```
 
-#[tokio::main]
-async fn main() -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
-        .init();
+- [ ] **Step 2: Run test to verify it fails**
 
-    let config = config::Config::load()?;
-    info!(
-        host = %config.server.host,
-        port = config.server.port,
-        "ClawChorus starting"
-    );
-    info!(
-        provider = %config.llm.provider,
-        model = %config.llm.model,
-        "LLM configuration"
-    );
+Run: `cargo test -p clawchorus --lib path::`
+Expected: FAIL — compile error, `per_user_synthesis_path` / `overall_synthesis_path` undefined.
 
-    let provider = build_provider(&config.llm)?;
-    let llm = LlmService::new(config.llm, provider);
-    let (llm_addr, _llm_handle) = llm.start("llm-service")?;
+- [ ] **Step 3: Add the helpers**
 
-    let mm = MemoryManager::new(config.memory, llm_addr)?;
-    let (_mm_addr, _mm_handle) = mm.start("memory-manager")?;
+In `src/memory/path.rs`, add after `derive_synthesis_path`:
 
-    info!("Memory Manager started");
-    info!("Initialisation complete — HTTP server not yet started");
+```rust
+/// Per-user synthesized summary path: `{username}/_synthesized/summary.md`.
+///
+/// A per-user summary folds both memory types together, so there is no
+/// `memory_type` segment.
+pub fn per_user_synthesis_path(username: &str) -> String {
+    format!("{}/_synthesized/summary.md", username)
+}
 
-    tokio::signal::ctrl_c().await?;
-    info!("Shutting down");
-
-    Ok(())
+/// Overall (cross-user) synthesized summary path: `_synthesized/summary.md`.
+pub fn overall_synthesis_path() -> String {
+    "_synthesized/summary.md".to_string()
 }
 ```
 
-- [ ] **Step 2: Build the workspace**
+- [ ] **Step 4: Run test to verify it passes**
 
-Run: `cargo build`
-Expected: success.
-
-- [ ] **Step 3: Run the full test suite**
-
-Run: `cargo test`
-Expected: all pass.
-
-- [ ] **Step 4: `cargo fmt`**
+Run: `cargo test -p clawchorus --lib path:: && cargo fmt`
+Expected: PASS.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/main.rs
-git commit -m "feat(llm): build provider at startup and inject into LlmService"
+git add src/memory/path.rs
+git commit -m "feat(memory): add stable synthesis path helpers"
 ```
 
 ---
 
-## Task 9: Parent-spec corrections
+## Task 8: Rewrite the Synthesizer as a two-pass flow
 
 **Files:**
-- Modify: `docs/superpowers/specs/clawchorus-design.md`
-- Modify: `docs/superpowers/specs/memory-manager-design.md`
+- Modify: `src/memory/synthesizer.rs`
+- Modify: `src/memory/manager.rs` (test path assertion around line 388-400)
 
-- [ ] **Step 1: Update `clawchorus-design.md`**
+- [ ] **Step 1: Update the Synthesizer's own test**
 
-Find the LLM Sub-system bullet (currently around line 63):
+In `src/memory/synthesizer.rs`, replace the `synthesizer_writes_synthesis_after_cooldown` test's assertion block (the `target_dir` / `entries` part, old lines 337-350) with a stable-path check, and delete the two `common_username` tests entirely:
 
-```
-- Two core capabilities: generate embeddings (spawns short-lived child per request), manage conversation sessions
-```
+```rust
+        tokio::time::sleep(Duration::from_millis(200)).await;
 
-Replace with:
-
-```
-- Two core capabilities: generate embeddings (handled inline on `LlmService` via a non-blocking future), manage conversation sessions
-```
-
-- [ ] **Step 2: Update `memory-manager-design.md`**
-
-Find the LLM Service Messages table row for `Embed`. The cell currently reads:
-
-```
-| FileOp Actor / Search Actor / Synthesizer | Embed(Vec\<String\>) | Vec\<Embedding\> (spawns short-lived child actor per request) |
+        let summary = dir.path().join("alice").join("_synthesized").join("summary.md");
+        assert!(
+            summary.is_file(),
+            "expected per-user summary at {:?}",
+            summary
+        );
 ```
 
-Replace with:
+(Delete `common_username_detects_single_owner` and `common_username_returns_none_for_mixed_owners` — the function they test is being removed.)
 
-```
-| FileOp Actor / Search Actor / Synthesizer | Embed(Vec\<String\>) | Vec\<Embedding\> |
+- [ ] **Step 2: Update the MemoryManager integration test**
+
+In `src/memory/manager.rs`, in `write_emits_synthesis_after_cooldown`, replace the `synth_dir` / `entries` assertion block (old lines 388-400) with:
+
+```rust
+        let summary = dir
+            .path()
+            .join("alice")
+            .join("_synthesized")
+            .join("summary.md");
+        assert!(
+            summary.is_file(),
+            "expected per-user summary at {:?}",
+            summary
+        );
 ```
 
-- [ ] **Step 3: Commit**
+- [ ] **Step 3: Run tests to verify they fail**
+
+Run: `cargo test -p clawchorus --lib synthesizer_writes_synthesis_after_cooldown`
+Expected: FAIL — the old timestamped file is written under `.../long_term/`, so `alice/_synthesized/summary.md` does not exist yet. (`common_username` tests no longer compile if not deleted — ensure they are deleted.)
+
+- [ ] **Step 4: Rewrite the module head**
+
+Replace lines 1-27 of `src/memory/synthesizer.rs` (doc comment through the `use` block) with:
+
+```rust
+//! Synthesizer Actor — long-lived child of MemoryManager.
+//!
+//! Receives fire-and-forget `FileChanged` notifications, batches them with a
+//! cool-down timer, then runs a two-pass synthesis. The per-user pass folds
+//! each affected user's changed files into that user's running summary; the
+//! overall pass folds the changed per-user summaries into a cross-user
+//! summary. Synthesis itself is delegated to LLM Service via `Synthesize`;
+//! this actor only reads sources, writes results, and indexes them.
+
+use std::collections::{BTreeMap, BTreeSet};
+use std::time::Duration;
+
+use acktor::{Actor, ActorContext, Address, Context, Handler, Message};
+use tokio::time::Instant;
+use tracing::{info, trace, warn};
+
+use crate::llm::{Embed, EmbedResult, LlmService, SourceDoc, Synthesize, SynthesisTarget};
+use crate::memory::{
+    chunking::chunk_text,
+    error::MemoryError,
+    index::Index,
+    messages::{Chunk, EnsureVecReady, FileChanged, IndexInsert, StorageRead, StorageWrite},
+    path::{overall_synthesis_path, per_user_synthesis_path},
+    storage::Storage,
+};
+```
+
+- [ ] **Step 5: Replace the `impl Synthesizer` body**
+
+Replace the entire `impl Synthesizer { ... }` block that contains `process()` and the free functions `build_synthesis_prompt`, `common_username`, `synthesis_filename` (old lines 43-246) with the following. Keep the `CooldownTick` struct (old lines 28-30) and the `Synthesizer` struct (old lines 32-41) as they are.
+
+```rust
+impl Synthesizer {
+    pub fn new(
+        storage: Address<Storage>,
+        index: Address<Index>,
+        llm: Address<LlmService>,
+        cooldown_secs: u64,
+        chunk_size: usize,
+        chunk_overlap: usize,
+    ) -> Self {
+        Self {
+            storage,
+            index,
+            llm,
+            cooldown: Duration::from_secs(cooldown_secs),
+            chunk_size,
+            chunk_overlap,
+            pending: BTreeSet::new(),
+            last_event: None,
+        }
+    }
+
+    /// Run the two-pass synthesis over the pending set.
+    async fn process(&mut self) {
+        if self.pending.is_empty() {
+            return;
+        }
+        let paths: Vec<String> = std::mem::take(&mut self.pending).into_iter().collect();
+        info!("Synthesizer: processing {} pending paths", paths.len());
+
+        // Group the changed paths by owning user.
+        let mut by_user: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        for path in paths {
+            match path.split('/').next() {
+                Some(u) if !u.is_empty() && u != "_synthesized" => {
+                    by_user.entry(u.to_string()).or_default().push(path);
+                }
+                _ => {}
+            }
+        }
+
+        // Per-user pass.
+        let mut changed_users: Vec<String> = Vec::new();
+        for (user, changed) in &by_user {
+            match self.synthesize_user(user, changed).await {
+                Ok(true) => changed_users.push(user.clone()),
+                Ok(false) => {}
+                Err(e) => warn!("Synthesizer: per-user synthesis for {} failed: {}", user, e),
+            }
+        }
+
+        // Overall pass.
+        if !changed_users.is_empty() {
+            if let Err(e) = self.synthesize_overall(&changed_users).await {
+                warn!("Synthesizer: overall synthesis failed: {}", e);
+            }
+        }
+    }
+
+    /// Re-synthesize one user from their changed files. Returns `true` if a
+    /// summary was written, `false` if there was nothing to synthesize.
+    async fn synthesize_user(
+        &self,
+        user: &str,
+        changed: &[String],
+    ) -> Result<bool, MemoryError> {
+        let mut sources = Vec::new();
+        for path in changed {
+            match self.storage_read(path).await? {
+                Some(content) => sources.push(SourceDoc {
+                    name: path.clone(),
+                    content,
+                }),
+                None => trace!("Synthesizer: source {} vanished, skipping", path),
+            }
+        }
+        if sources.is_empty() {
+            return Ok(false);
+        }
+
+        let summary_path = per_user_synthesis_path(user);
+        let prior_summary = self.storage_read(&summary_path).await?;
+        let synthesis = self
+            .request_synthesis(
+                SynthesisTarget::User(user.to_string()),
+                prior_summary,
+                sources,
+            )
+            .await?;
+        self.write_synthesis(&summary_path, &synthesis).await?;
+        info!("Synthesizer: per-user synthesis written to {}", summary_path);
+        Ok(true)
+    }
+
+    /// Synthesize the cross-user summary from the changed per-user summaries.
+    async fn synthesize_overall(&self, changed_users: &[String]) -> Result<(), MemoryError> {
+        let mut sources = Vec::new();
+        for user in changed_users {
+            let path = per_user_synthesis_path(user);
+            if let Some(content) = self.storage_read(&path).await? {
+                sources.push(SourceDoc { name: path, content });
+            }
+        }
+        if sources.is_empty() {
+            return Ok(());
+        }
+
+        let summary_path = overall_synthesis_path();
+        let prior_summary = self.storage_read(&summary_path).await?;
+        let synthesis = self
+            .request_synthesis(SynthesisTarget::Overall, prior_summary, sources)
+            .await?;
+        self.write_synthesis(&summary_path, &synthesis).await?;
+        info!("Synthesizer: overall synthesis written to {}", summary_path);
+        Ok(())
+    }
+
+    /// Chunk, embed, and write a synthesized document to Storage and Index.
+    async fn write_synthesis(&self, path: &str, content: &str) -> Result<(), MemoryError> {
+        self.storage_write(path, content).await?;
+
+        let text_chunks = chunk_text(content, self.chunk_size, self.chunk_overlap);
+        if text_chunks.is_empty() {
+            return Ok(());
+        }
+        let texts: Vec<String> = text_chunks.iter().map(|c| c.text.clone()).collect();
+        let embed_result = self.embed(texts).await?;
+        let chunks: Vec<Chunk> = text_chunks
+            .into_iter()
+            .zip(embed_result.embeddings)
+            .map(|(tc, emb)| Chunk {
+                text: tc.text,
+                start_line: tc.start_line,
+                end_line: tc.end_line,
+                embedding: emb,
+            })
+            .collect();
+        self.index_insert(path, content, chunks, embed_result.model)
+            .await
+    }
+
+    async fn storage_read(&self, path: &str) -> Result<Option<String>, MemoryError> {
+        let fut = self
+            .storage
+            .send(StorageRead {
+                path: path.to_string(),
+            })
+            .await
+            .map_err(|e| MemoryError::Actor(e.to_string()))?;
+        let res = fut.await.map_err(|e| MemoryError::Actor(e.to_string()))?;
+        Ok(res?)
+    }
+
+    async fn storage_write(&self, path: &str, content: &str) -> Result<(), MemoryError> {
+        let fut = self
+            .storage
+            .send(StorageWrite {
+                path: path.to_string(),
+                content: content.to_string(),
+            })
+            .await
+            .map_err(|e| MemoryError::Actor(e.to_string()))?;
+        fut.await.map_err(|e| MemoryError::Actor(e.to_string()))??;
+        Ok(())
+    }
+
+    async fn embed(&self, texts: Vec<String>) -> Result<EmbedResult, MemoryError> {
+        let fut = self
+            .llm
+            .send(Embed { texts })
+            .await
+            .map_err(|e| MemoryError::Actor(e.to_string()))?;
+        let res = fut.await.map_err(|e| MemoryError::Actor(e.to_string()))?;
+        Ok(res?)
+    }
+
+    async fn request_synthesis(
+        &self,
+        target: SynthesisTarget,
+        prior_summary: Option<String>,
+        sources: Vec<SourceDoc>,
+    ) -> Result<String, MemoryError> {
+        let fut = self
+            .llm
+            .send(Synthesize {
+                target,
+                prior_summary,
+                sources,
+            })
+            .await
+            .map_err(|e| MemoryError::Actor(e.to_string()))?;
+        let res = fut.await.map_err(|e| MemoryError::Actor(e.to_string()))?;
+        Ok(res?)
+    }
+
+    async fn index_insert(
+        &self,
+        path: &str,
+        content: &str,
+        chunks: Vec<Chunk>,
+        model: String,
+    ) -> Result<(), MemoryError> {
+        if let Some(first) = chunks.first() {
+            let dim = first.embedding.0.len();
+            let fut = self
+                .index
+                .send(EnsureVecReady { dim })
+                .await
+                .map_err(|e| MemoryError::Actor(e.to_string()))?;
+            fut.await.map_err(|e| MemoryError::Actor(e.to_string()))??;
+        }
+        let fut = self
+            .index
+            .send(IndexInsert {
+                path: path.to_string(),
+                source: "synthesized".to_string(),
+                size: content.len() as u64,
+                model,
+                chunks,
+            })
+            .await
+            .map_err(|e| MemoryError::Actor(e.to_string()))?;
+        fut.await.map_err(|e| MemoryError::Actor(e.to_string()))??;
+        Ok(())
+    }
+}
+```
+
+- [ ] **Step 6: Update the `CooldownTick` handler**
+
+In `src/memory/synthesizer.rs`, add the mandatory trace line to the `CooldownTick` handler:
+
+```rust
+impl Handler<CooldownTick> for Synthesizer {
+    type Result = ();
+
+    async fn handle(&mut self, msg: CooldownTick, _ctx: &mut Self::Context) {
+        trace!("Handle command {:?}", msg);
+        let should_process = matches!(self.last_event, Some(t) if t.elapsed() >= self.cooldown);
+        if !should_process {
+            return;
+        }
+        self.process().await;
+    }
+}
+```
+
+And in the `FileChanged` handler, change its first line to the standard form:
+
+```rust
+    async fn handle(&mut self, msg: FileChanged, ctx: &mut Self::Context) {
+        trace!("Handle command {:?}", msg);
+        self.pending.insert(msg.rel_path);
+```
+
+- [ ] **Step 7: Run tests to verify they pass**
+
+Run: `cargo test -p clawchorus --lib synthesizer && cargo test -p clawchorus --lib write_emits_synthesis_after_cooldown`
+Expected: PASS — `synthesizer_writes_synthesis_after_cooldown` and `write_emits_synthesis_after_cooldown` both find `alice/_synthesized/summary.md`.
+
+These tests run from the crate root, so the `Default` config's `prompts_dir = ./prompts` resolves to the templates created in Task 3.
+
+- [ ] **Step 8: Run the full library suite and format**
+
+Run: `cargo test -p clawchorus --lib && cargo fmt`
+Expected: PASS.
+
+- [ ] **Step 9: Commit**
 
 ```bash
-git add docs/superpowers/specs/clawchorus-design.md docs/superpowers/specs/memory-manager-design.md
-git commit -m "docs: align embed wording with inline FutureMessageResult"
+git add src/memory/synthesizer.rs src/memory/manager.rs
+git commit -m "feat(memory): two-pass synthesizer over Synthesize message"
 ```
 
 ---
 
-## Final Verification
+## Task 9: Remove the dead `Session` path
 
-- [ ] **Step 1: Full build**
+Nothing references `Session`, `StartSession`, `SendMessage`, `StopSession`, or `derive_synthesis_path` anymore. Remove them.
 
-Run: `cargo build`
-Expected: success.
+**Files:**
+- Delete: `src/llm/session.rs`
+- Modify: `src/llm.rs` (remove `StartSession`, the `Session` handler, the `session` module)
+- Modify: `src/memory/path.rs` (remove `derive_synthesis_path` + its tests)
 
-- [ ] **Step 2: Full test**
+- [ ] **Step 1: Delete the session module file**
 
-Run: `cargo test`
-Expected: all pass.
+```bash
+git rm src/llm/session.rs
+```
 
-- [ ] **Step 3: Lint**
+- [ ] **Step 2: Remove `Session` from `src/llm.rs`**
 
-Run: `cargo clippy --all-targets -- -D warnings`
-Expected: clean.
+In `src/llm.rs`:
+- Delete the `use crate::llm::session::Session;` line.
+- Delete the `pub mod session;` line.
+- Delete the `StartSession` struct definition (the `#[derive(Debug, Message)]` block with `#[result_type(Result<Address<Session>, LlmError>)]`).
+- Delete the entire `impl Handler<StartSession> for LlmService { ... }` block.
+- Delete the `start_session_returns_working_address` test from the `tests` module.
+- If `Address` is now unused in `src/llm.rs`, remove it from the `acktor` import line. (`Address<Embedder>` and `Address<SynthesisTask>` are still used in the `LlmService` struct, so `Address` stays — verify with the compiler.)
 
-- [ ] **Step 4: Format check**
+- [ ] **Step 3: Remove `derive_synthesis_path` from `src/memory/path.rs`**
+
+In `src/memory/path.rs`, delete the `derive_synthesis_path` function and the two tests that use it (`per_user_synthesis_path` — the old test at line 69 named `per_user_synthesis_path`, and `cross_user_synthesis_path`). Keep the new `per_user_synthesis_path_has_no_memory_type` and `overall_synthesis_path_is_top_level` tests added in Task 7.
+
+Note: there is an old test named `per_user_synthesis_path` (testing `derive_synthesis_path`) and a new function named `per_user_synthesis_path`. Deleting the old test removes the name clash.
+
+- [ ] **Step 4: Run the full suite to verify nothing broke**
+
+Run: `cargo build -p clawchorus 2>&1`
+Expected: clean build, no `unused import` or `dead_code` warnings for the removed items.
+
+Run: `cargo test -p clawchorus --lib && cargo fmt`
+Expected: PASS.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/llm.rs src/memory/path.rs
+git commit -m "refactor(llm): remove dead Session actor and derive_synthesis_path"
+```
+
+---
+
+## Task 10: Full verification
+
+**Files:** none (verification only)
+
+- [ ] **Step 1: Run the entire test suite**
+
+Run: `cargo test -p clawchorus`
+Expected: PASS — library tests plus the `wiremock`-based DeepSeek integration tests.
+
+- [ ] **Step 2: Check for warnings**
+
+Run: `cargo build -p clawchorus --all-targets 2>&1`
+Expected: no warnings.
+
+- [ ] **Step 3: Confirm formatting**
 
 Run: `cargo fmt --check`
-Expected: clean.
+Expected: no output (already formatted).
+
+- [ ] **Step 4: Spot-check the doc comment in `src/llm.rs`**
+
+Confirm the module doc comment no longer mentions "conversation sessions" and reads as the new head written in Task 6.
+
+- [ ] **Step 5: Commit if anything changed**
+
+If steps 1-4 required fixes:
+
+```bash
+git add -A
+git commit -m "chore: post-refactor verification fixes"
+```
+
+Otherwise, no commit.
+
+---
+
+## Self-Review Notes
+
+- **Spec coverage:** `Embedder` (Task 4), `SynthesisTask` + `Synthesize` + `SynthesisTarget` + `SourceDoc` (Task 5), `LlmService` routing + `TaskDied` supervision (Task 6), prompt templates with provider override + hot-reload (Task 3), config fields incl. rename (Task 2), `Provider::name()` (Task 1), two-pass Synthesizer feeding only changed files (Task 8), stable summary paths without the `memory_type` segment (Task 7), removal of the generic `Session` API (Task 9). All `llm-service-design.md` and the Synthesizer section of `memory-manager-design.md` are covered.
+- **Reset-and-reseed:** unified in `SynthesisTask::handle` — an empty `history` (cold start, post-restart, post-reset) reseeds from `prior_summary`; the Synthesizer always supplies the current on-disk summary.
+- **Type consistency:** `Synthesize { target, prior_summary, sources }`, `SourceDoc { name, content }`, `SynthesisTarget::{User, Overall}`, `TemplateKind::{PerUser, Overall}`, `load_template(prompts_dir, provider_name, kind)`, `SynthesisTask::new(provider, kind, prompts_dir, idle_timeout, max_retries, context_max_chars)`, `Embedder::new(provider, max_retries)`, `LlmService::new(config, provider) -> Result<Self, LlmError>` — used identically across Tasks 5, 6, and 8.
+- **Compile-safety:** `Session`/`StartSession` and `derive_synthesis_path` are kept until Task 9; every task leaves the crate building and the suite green.

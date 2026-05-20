@@ -11,7 +11,7 @@ use tracing::{debug, error, info, warn};
 use crate::config::Config;
 use crate::error::ClawChorusError;
 use crate::http::HttpServer;
-use crate::llm::{LlmService, build_provider};
+use crate::llm::LlmService;
 use crate::memory::MemoryManager;
 
 pub struct ClawChorus {
@@ -51,11 +51,9 @@ impl Actor for ClawChorus {
             ..
         } = self.config.clone();
 
-        let provider = build_provider(&llm)?;
-
         let (llm_addr, llm_handle) = LlmService::create("llm-service", |child_ctx| {
             child_ctx.set_supervisor(Some(ctx.address().into()));
-            Ok(LlmService::new(llm, provider))
+            Ok(LlmService::new(llm))
         })?;
 
         let (memory_addr, memory_handle) = MemoryManager::create("memory-manager", |child_ctx| {

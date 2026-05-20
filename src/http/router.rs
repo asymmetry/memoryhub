@@ -15,12 +15,14 @@ use crate::memory::{
 };
 
 pub fn build_router(state: HttpServerState) -> Router {
-    Router::new()
+    let v1 = Router::new()
         .route("/health", get(health))
         .route("/memories/write", post(write))
         .route("/memories/read", post(read))
         .route("/memories/delete", post(delete))
-        .route("/search", post(search))
+        .route("/search", post(search));
+    Router::new()
+        .nest("/v1", v1)
         .layer(TraceLayer::new_for_http())
         .with_state(state)
 }

@@ -38,15 +38,15 @@ Handlers are plain async functions with `State<Addr<MemoryManager>>`, not actor 
 
 ## Endpoints
 
-All bodies are JSON. All response bodies are JSON. No path prefix, no versioning.
+All bodies are JSON. All response bodies are JSON. All routes are nested under the `/v1` prefix.
 
-| Method | Path               | Body                                                   | Actor message  | 200 reply                          |
-| ------ | ------------------ | ------------------------------------------------------ | -------------- | ---------------------------------- |
-| GET    | `/health`          | —                                                      | —              | `{"status":"ok"}`                  |
-| POST   | `/memories/write`  | `{username, agent_id, memory_type, filename, content}` | `FileOpWrite`  | `{}`                               |
-| POST   | `/memories/read`   | `{username, agent_id, memory_type, filename}`          | `FileOpRead`   | `{"content": "..."}` or 404        |
-| POST   | `/memories/delete` | `{username, agent_id, memory_type, filename}`          | `FileOpDelete` | `{}`                               |
-| POST   | `/search`          | `{username, agent_id, query}`                          | `Search`       | `{"results": [SearchResult, ...]}` |
+| Method | Path                  | Body                                                   | Actor message  | 200 reply                          |
+| ------ | --------------------- | ------------------------------------------------------ | -------------- | ---------------------------------- |
+| GET    | `/v1/health`          | —                                                      | —              | `{"status":"ok"}`                  |
+| POST   | `/v1/memories/write`  | `{username, agent_id, memory_type, filename, content}` | `FileOpWrite`  | `{}`                               |
+| POST   | `/v1/memories/read`   | `{username, agent_id, memory_type, filename}`          | `FileOpRead`   | `{"content": "..."}` or 404        |
+| POST   | `/v1/memories/delete` | `{username, agent_id, memory_type, filename}`          | `FileOpDelete` | `{}`                               |
+| POST   | `/v1/search`          | `{username, agent_id, query}`                          | `Search`       | `{"results": [SearchResult, ...]}` |
 
 ### Field conventions
 
@@ -113,8 +113,7 @@ Out of scope: load tests, fuzzing, end-to-end tests against a real LLM service.
 ## Out of Scope (Future Work)
 
 - Authentication / authorization
-- API versioning (`/v1/...`)
 - List/enumerate endpoints
-- Readiness probe distinct from `/health`
+- Readiness probe distinct from `/v1/health`
 - Streaming responses
 - Rate limiting

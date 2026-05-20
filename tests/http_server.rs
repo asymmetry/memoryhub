@@ -65,7 +65,7 @@ async fn health_returns_ok() {
     let app = build_router(HttpServerState::new(mm));
 
     let req = Request::builder()
-        .uri("/health")
+        .uri("/v1/health")
         .body(Body::empty())
         .unwrap();
     let resp = app.oneshot(req).await.unwrap();
@@ -85,7 +85,7 @@ async fn write_then_read_then_delete_then_read_404() {
     // Write.
     let req = Request::builder()
         .method("POST")
-        .uri("/memories/write")
+        .uri("/v1/memories/write")
         .header("content-type", "application/json")
         .body(Body::from(format!(
             r#"{{
@@ -105,7 +105,7 @@ async fn write_then_read_then_delete_then_read_404() {
     // Read.
     let req = Request::builder()
         .method("POST")
-        .uri("/memories/read")
+        .uri("/v1/memories/read")
         .header("content-type", "application/json")
         .body(Body::from(format!(
             r#"{{
@@ -124,7 +124,7 @@ async fn write_then_read_then_delete_then_read_404() {
     // Delete.
     let req = Request::builder()
         .method("POST")
-        .uri("/memories/delete")
+        .uri("/v1/memories/delete")
         .header("content-type", "application/json")
         .body(Body::from(format!(
             r#"{{
@@ -142,7 +142,7 @@ async fn write_then_read_then_delete_then_read_404() {
     // Read after delete -> 404.
     let req = Request::builder()
         .method("POST")
-        .uri("/memories/read")
+        .uri("/v1/memories/read")
         .header("content-type", "application/json")
         .body(Body::from(format!(
             r#"{{
@@ -169,7 +169,7 @@ async fn search_after_write_returns_results() {
 
     let req = Request::builder()
         .method("POST")
-        .uri("/memories/write")
+        .uri("/v1/memories/write")
         .header("content-type", "application/json")
         .body(Body::from(format!(
             r#"{{
@@ -186,7 +186,7 @@ async fn search_after_write_returns_results() {
 
     let req = Request::builder()
         .method("POST")
-        .uri("/search")
+        .uri("/v1/search")
         .header("content-type", "application/json")
         .body(Body::from(format!(
             r#"{{
@@ -211,7 +211,7 @@ async fn bad_json_returns_400() {
 
     let req = Request::builder()
         .method("POST")
-        .uri("/memories/write")
+        .uri("/v1/memories/write")
         .header("content-type", "application/json")
         .body(Body::from("{not valid json}"))
         .unwrap();

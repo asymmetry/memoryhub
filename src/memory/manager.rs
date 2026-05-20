@@ -89,28 +89,37 @@ impl MemoryManager {
     /// Build a [`FutureMessageResult`] that spawns a fresh [`FileOp`] actor and
     /// drives the request off-mailbox, so the `MemoryManager` is free to
     /// process the next message while the pipeline runs.
-    fn dispatch_file_op<M, T>(&self, msg: M) -> FutureMessageResult<M>
+    ///
+    /// The spawn and the `send` happen inside this `async fn` so the message
+    /// is queued in mailbox order before the handler returns; only the wait
+    /// for the reply is deferred into the returned `FutureMessageResult`.
+    async fn dispatch_file_op<M, T>(&self, msg: M) -> FutureMessageResult<M>
     where
         M: Message<Result = Result<T>> + Send + 'static,
         T: Send + 'static,
         FileOp: Handler<M>,
     {
-        let storage = self.storage.clone();
-        let index = self.index.clone();
-        let llm = self.llm.clone();
-        let synthesizer = self.synthesizer.clone();
-        let chunk_size = self.config.chunk_size;
-        let chunk_overlap = self.config.chunk_overlap;
+        let prepared = match FileOp::new(
+            self.storage.clone(),
+            self.index.clone(),
+            self.llm.clone(),
+            self.synthesizer.clone(),
+            self.config.chunk_size,
+            self.config.chunk_overlap,
+        )
+        .start("file-op")
+        {
+            Ok((addr, _handle)) => match addr.send(msg).await {
+                Ok(rx) => Ok::<_, MemoryError>((addr, rx)),
+                Err(e) => Err(MemoryError::Actor(e.to_string())),
+            },
+            Err(_) => Err(MemoryError::Actor("failed to spawn FileOp".to_string())),
+        };
         FutureMessageResult::new(async move {
-            let (addr, _handle) =
-                FileOp::new(storage, index, llm, synthesizer, chunk_size, chunk_overlap)
-                    .start("file-op")
-                    .map_err(|_| MemoryError::Actor("failed to spawn FileOp".to_string()))?;
-            addr.send(msg)
-                .await
-                .map_err(|e| MemoryError::Actor(e.to_string()))?
-                .await
-                .map_err(|e| MemoryError::Actor(e.to_string()))?
+            // Keep `_addr` alive across the response wait so the per-request
+            // actor isn't terminated before it can reply.
+            let (_addr, rx) = prepared?;
+            rx.await.map_err(|e| MemoryError::Actor(e.to_string()))?
         })
     }
 }
@@ -174,7 +183,7 @@ impl Handler<FileOpWrite> for MemoryManager {
         _ctx: &mut Self::Context,
     ) -> FutureMessageResult<FileOpWrite> {
         trace!("Handle command {:?}", msg);
-        self.dispatch_file_op(msg)
+        self.dispatch_file_op(msg).await
     }
 }
 
@@ -187,7 +196,7 @@ impl Handler<FileOpRead> for MemoryManager {
         _ctx: &mut Self::Context,
     ) -> FutureMessageResult<FileOpRead> {
         trace!("Handle command {:?}", msg);
-        self.dispatch_file_op(msg)
+        self.dispatch_file_op(msg).await
     }
 }
 
@@ -200,7 +209,7 @@ impl Handler<FileOpDelete> for MemoryManager {
         _ctx: &mut Self::Context,
     ) -> FutureMessageResult<FileOpDelete> {
         trace!("Handle command {:?}", msg);
-        self.dispatch_file_op(msg)
+        self.dispatch_file_op(msg).await
     }
 }
 
@@ -213,19 +222,25 @@ impl Handler<Search> for MemoryManager {
         _ctx: &mut Self::Context,
     ) -> FutureMessageResult<Search> {
         trace!("Handle command {:?}", msg);
-        let index = self.index.clone();
-        let llm = self.llm.clone();
-        let chunk_size = self.config.chunk_size;
-        let chunk_overlap = self.config.chunk_overlap;
+        // Spawn and send eagerly so the message is queued in mailbox order;
+        // only the response wait is deferred into the FutureMessageResult.
+        let prepared = match SearchOp::new(
+            self.index.clone(),
+            self.llm.clone(),
+            self.config.chunk_size,
+            self.config.chunk_overlap,
+        )
+        .start("search-op")
+        {
+            Ok((addr, _handle)) => match addr.send(msg).await {
+                Ok(rx) => Ok::<_, MemoryError>((addr, rx)),
+                Err(e) => Err(MemoryError::Actor(e.to_string())),
+            },
+            Err(_) => Err(MemoryError::Actor("failed to spawn SearchOp".to_string())),
+        };
         FutureMessageResult::new(async move {
-            let (addr, _handle) = SearchOp::new(index, llm, chunk_size, chunk_overlap)
-                .start("search-op")
-                .map_err(|_| MemoryError::Actor("failed to spawn SearchOp".to_string()))?;
-            addr.send(msg)
-                .await
-                .map_err(|e| MemoryError::Actor(e.to_string()))?
-                .await
-                .map_err(|e| MemoryError::Actor(e.to_string()))?
+            let (_addr, rx) = prepared?;
+            rx.await.map_err(|e| MemoryError::Actor(e.to_string()))?
         })
     }
 }
@@ -241,9 +256,12 @@ mod tests {
     };
 
     fn test_llm() -> Address<LlmService> {
-        let provider = std::sync::Arc::new(crate::llm::provider::mock::MockProvider::new());
-        let llm = LlmService::new(Default::default(), provider);
-        let (addr, _handle) = llm.start("llm-test").unwrap();
+        let cfg = crate::llm::LlmConfig {
+            provider: "mock".into(),
+            embedding_provider: "mock".into(),
+            ..Default::default()
+        };
+        let (addr, _handle) = LlmService::new(cfg).start("llm-test").unwrap();
         addr
     }
 
@@ -385,18 +403,15 @@ mod tests {
 
         tokio::time::sleep(std::time::Duration::from_millis(300)).await;
 
-        let synth_dir = dir
+        let summary = dir
             .path()
             .join("alice")
             .join("_synthesized")
-            .join("long_term");
-        let entries: Vec<_> = std::fs::read_dir(&synth_dir)
-            .map(|rd| rd.filter_map(|e| e.ok()).collect())
-            .unwrap_or_default();
+            .join("summary.md");
         assert!(
-            !entries.is_empty(),
-            "expected synthesis file under {:?}",
-            synth_dir
+            summary.is_file(),
+            "expected per-user summary at {:?}",
+            summary
         );
     }
 }

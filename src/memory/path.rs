@@ -20,23 +20,17 @@ pub fn derive_rel_path(
     format!("{}/{}/{}/{}", username, agent_id, type_dir, filename)
 }
 
-/// Derive the relative filesystem path for a synthesized memory file.
+/// Per-user synthesized summary path: `{username}/_synthesized/summary.md`.
 ///
-/// `username = Some(...)` → `{username}/_synthesized/{memory_type}/{filename}`
-/// `username = None`       → `_synthesized/{memory_type}/{filename}`
-pub fn derive_synthesis_path(
-    username: Option<&str>,
-    memory_type: MemoryType,
-    filename: &str,
-) -> String {
-    let type_dir = match memory_type {
-        MemoryType::DailyNote => "daily_note",
-        MemoryType::LongTerm => "long_term",
-    };
-    match username {
-        Some(u) => format!("{}/_synthesized/{}/{}", u, type_dir, filename),
-        None => format!("_synthesized/{}/{}", type_dir, filename),
-    }
+/// A per-user summary folds both memory types together, so there is no
+/// `memory_type` segment.
+pub fn per_user_synthesis_path(username: &str) -> String {
+    format!("{}/_synthesized/summary.md", username)
+}
+
+/// Global (cross-user) synthesized summary path: `_synthesized/summary.md`.
+pub fn global_synthesis_path() -> String {
+    "_synthesized/summary.md".to_string()
 }
 
 #[cfg(test)]
@@ -66,14 +60,15 @@ mod tests {
     }
 
     #[test]
-    fn per_user_synthesis_path() {
-        let path = derive_synthesis_path(Some("alice"), MemoryType::DailyNote, "2026-05-13.md");
-        assert_eq!(path, "alice/_synthesized/daily_note/2026-05-13.md");
+    fn per_user_synthesis_path_has_no_memory_type() {
+        assert_eq!(
+            super::per_user_synthesis_path("alice"),
+            "alice/_synthesized/summary.md"
+        );
     }
 
     #[test]
-    fn cross_user_synthesis_path() {
-        let path = derive_synthesis_path(None, MemoryType::LongTerm, "merged.md");
-        assert_eq!(path, "_synthesized/long_term/merged.md");
+    fn global_synthesis_path_is_top_level() {
+        assert_eq!(global_synthesis_path(), "_synthesized/summary.md");
     }
 }

@@ -1,24 +1,34 @@
-//! LLM Service Actor — handles embedding and conversation sessions.
+//! LLM Service Actor — the single entry point for embedding and synthesis.
 //!
-//! Sibling of Memory Manager, supervised by the top-level Manager.
+//! Sibling of Memory Manager, supervised by the top-level Manager. It spawns
+//! an `Embedder` child and one long-lived `SynthesisTask` child per target.
 
 use std::sync::Arc;
-use std::time::Duration;
 
-use acktor::{Actor, Address, Context, Handler, Message, message::FutureMessageResult};
-use tracing::trace;
-
-use crate::llm::config::LlmConfig;
-use crate::llm::session::Session;
+use acktor::{
+    Actor, ActorContext, Address, Context, ErrorReport, Handler, JoinHandle, Message,
+    message::FutureMessageResult,
+    utils::{debug_trace, terminate_actor},
+};
+use ahash::HashMap;
+use tracing::warn;
 
 mod error;
-pub use crate::llm::error::LlmError;
+pub use error::LlmError;
 
-pub mod config;
-pub mod session;
+mod config;
+pub use config::LlmConfig;
 
 pub mod provider;
-pub use provider::{Provider, build_provider};
+pub use provider::{EmbeddingProvider, Provider, build_providers};
+
+mod embedder;
+pub use embedder::Embedder;
+
+pub mod template;
+
+pub mod synthesis;
+pub use synthesis::{SourceDoc, SynthesisTarget, SynthesisTask, Synthesize};
 
 /// A single embedding vector.
 #[derive(Debug)]
@@ -38,86 +48,160 @@ pub struct Embed {
     pub texts: Vec<String>,
 }
 
-/// Open a new conversation session. Reply is the spawned `Session` actor's address.
 #[derive(Debug, Message)]
-#[result_type(Result<Address<Session>, LlmError>)]
-pub struct StartSession;
+#[result_type(())]
+struct SynthesisTaskTerminated {
+    target: SynthesisTarget,
+}
 
 pub struct LlmService {
     config: LlmConfig,
-    provider: Arc<dyn Provider>,
+    provider: Option<Arc<dyn Provider>>,
+    embedder: Option<Address<Embedder>>,
+    embedder_handle: Option<JoinHandle<()>>,
+    tasks: HashMap<SynthesisTarget, Address<SynthesisTask>>,
 }
 
 impl LlmService {
-    pub fn new(config: LlmConfig, provider: Arc<dyn Provider>) -> Self {
-        Self { config, provider }
+    /// Constructs a new `LlmService` with the given config.
+    pub fn new(config: LlmConfig) -> Self {
+        Self {
+            config,
+            provider: None,
+            embedder: None,
+            embedder_handle: None,
+            tasks: HashMap::default(),
+        }
+    }
+
+    fn provider(&self) -> &Arc<dyn Provider> {
+        self.provider
+            .as_ref()
+            .expect("LlmService.provider must be initialized by post_start")
     }
 }
 
 impl Actor for LlmService {
     type Context = Context<Self>;
     type Error = LlmError;
+
+    async fn post_start(&mut self, _ctx: &mut Self::Context) -> Result<(), LlmError> {
+        let (chat, embedding) = build_providers(&self.config)?;
+        self.provider = Some(chat);
+
+        if let Err(e) = template::write_default_templates(&self.config.prompts_dir).await {
+            warn!("Could not write default prompt templates: {}", e.report());
+        }
+
+        let (embedder, handle) =
+            Embedder::new(embedding, self.config.max_retries).start("embedder")?;
+        self.embedder = Some(embedder);
+        self.embedder_handle = Some(handle);
+
+        Ok(())
+    }
+
+    async fn post_stop(&mut self, _ctx: &mut Self::Context) -> Result<(), LlmError> {
+        if let (Some(embedder), Some(handle)) = (self.embedder.take(), self.embedder_handle.take())
+        {
+            terminate_actor(embedder, handle).await;
+        }
+
+        Ok(())
+    }
 }
 
 impl Handler<Embed> for LlmService {
     type Result = FutureMessageResult<Embed>;
 
-    async fn handle(&mut self, msg: Embed, _ctx: &mut Self::Context) -> FutureMessageResult<Embed> {
-        trace!("Handle command {:?}", msg);
-        let provider = self.provider.clone();
-        let max_retries = self.config.max_retries;
-        FutureMessageResult::new(async move {
-            provider::retry(max_retries, || provider.embed(&msg.texts)).await
-        })
+    async fn handle(&mut self, msg: Embed, _ctx: &mut Self::Context) -> Self::Result {
+        debug_trace!("Handle command {:?}", msg);
+
+        let embedder = self
+            .embedder
+            .clone()
+            .expect("LlmService.embedder must be initialized by post_start");
+        FutureMessageResult::new(async move { embedder.send(msg).await?.await? })
     }
 }
 
-impl Handler<StartSession> for LlmService {
-    type Result = FutureMessageResult<StartSession>;
+impl Handler<Synthesize> for LlmService {
+    type Result = FutureMessageResult<Synthesize>;
 
-    async fn handle(
-        &mut self,
-        msg: StartSession,
-        _ctx: &mut Self::Context,
-    ) -> FutureMessageResult<StartSession> {
-        trace!("Handle command {:?}", msg);
-        let provider = self.provider.clone();
-        let model = self.config.model.clone();
-        let idle = Duration::from_secs(self.config.session_idle_timeout_secs);
-        let max_retries = self.config.max_retries;
-        FutureMessageResult::new(async move {
-            let (addr, _handle) = Session::new(provider, model, idle, max_retries)
-                .start("session")
-                .map_err(|e| LlmError::Actor(e.to_string()))?;
-            Ok(addr)
-        })
+    async fn handle(&mut self, msg: Synthesize, ctx: &mut Self::Context) -> Self::Result {
+        debug_trace!("Handle command {:?}", msg);
+
+        let task = match self.tasks.get(&msg.target) {
+            Some(addr) => addr.clone(),
+            None => {
+                let target = msg.target.clone();
+                let label = target.label();
+                let new_task = SynthesisTask::new(
+                    self.config.clone(),
+                    self.provider().clone(),
+                    target.template_kind(),
+                );
+                match new_task.start(&label) {
+                    Ok((addr, handle)) => {
+                        // When the task self-terminates on idle, tell ourselves
+                        // so the stale map entry is dropped.
+                        let self_addr = ctx.address().clone();
+                        let dead = target.clone();
+                        tokio::spawn(async move {
+                            let _ = handle.await;
+                            let _ = self_addr
+                                .do_send(SynthesisTaskTerminated { target: dead })
+                                .await;
+                        });
+                        self.tasks.insert(target, addr.clone());
+                        addr
+                    }
+                    Err(e) => {
+                        return FutureMessageResult::new(async move { Err(e) });
+                    }
+                }
+            }
+        };
+
+        FutureMessageResult::new(async move { task.send(msg).await?.await? })
+    }
+}
+
+impl Handler<SynthesisTaskTerminated> for LlmService {
+    type Result = ();
+
+    async fn handle(&mut self, msg: SynthesisTaskTerminated, _ctx: &mut Self::Context) {
+        debug_trace!("Handle command {:?}", msg);
+
+        self.tasks.remove(&msg.target);
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::llm::provider::mock::MockProvider;
-    use crate::llm::provider::{ChatResponse, Role};
 
     fn cfg() -> LlmConfig {
         LlmConfig {
-            session_idle_timeout_secs: 60,
+            provider: "mock".to_string(),
+            embedding_provider: "mock".to_string(),
+            synthesis_idle_timeout_secs: 60,
             ..LlmConfig::default()
         }
     }
 
     #[tokio::test]
-    async fn embed_returns_mock_vectors() {
-        let mock = Arc::new(MockProvider::new());
-        mock.push_embed(Ok(MockProvider::canned_embed(3, 2, "mock-emb")));
+    async fn synthesize_spawns_task_and_returns_reply() {
+        let (addr, _h) = LlmService::new(cfg()).start("llm-test").unwrap();
 
-        let svc = LlmService::new(cfg(), mock.clone());
-        let (addr, _h) = svc.start("llm-test").unwrap();
-
-        let out = addr
-            .send(Embed {
-                texts: vec!["a".into(), "b".into()],
+        let reply = addr
+            .send(Synthesize {
+                target: crate::llm::SynthesisTarget::User("alice".into()),
+                prior_summary: None,
+                sources: vec![crate::llm::SourceDoc {
+                    name: "alice/a/daily_note/x.md".into(),
+                    content: "hello".into(),
+                }],
             })
             .await
             .unwrap()
@@ -125,44 +209,6 @@ mod tests {
             .unwrap()
             .unwrap();
 
-        assert_eq!(out.embeddings.len(), 2);
-        assert_eq!(out.model, "mock-emb");
-        assert_eq!(mock.embed_call_count(), 1);
-    }
-
-    #[tokio::test]
-    async fn start_session_returns_working_address() {
-        let mock = Arc::new(MockProvider::new());
-        mock.push_chat(Ok(ChatResponse {
-            model: "mock-chat".into(),
-            content: "hello".into(),
-        }));
-
-        let svc = LlmService::new(cfg(), mock.clone());
-        let (addr, _h) = svc.start("llm-test").unwrap();
-
-        let sess = addr
-            .send(StartSession)
-            .await
-            .unwrap()
-            .await
-            .unwrap()
-            .unwrap();
-
-        let reply = sess
-            .send(crate::llm::session::SendMessage {
-                content: "hi".into(),
-            })
-            .await
-            .unwrap()
-            .await
-            .unwrap()
-            .unwrap();
-
-        assert_eq!(reply, "hello");
-        let last = mock.last_chat_call().unwrap();
-        assert_eq!(last.len(), 1);
-        assert_eq!(last[0].role, Role::User);
-        assert_eq!(last[0].content, "hi");
+        assert!(!reply.is_empty());
     }
 }

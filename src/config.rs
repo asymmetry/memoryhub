@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::error::ConfigError;
-pub use crate::llm::config::LlmConfig;
+pub use crate::llm::LlmConfig;
 pub use crate::memory::config::MemoryConfig;
 
 /// Full application configuration loaded from `config.toml`.

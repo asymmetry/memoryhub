@@ -54,20 +54,8 @@ impl MockProvider {
 }
 
 impl Provider for MockProvider {
-    fn embed<'a>(
-        &'a self,
-        texts: &'a [String],
-    ) -> Pin<Box<dyn Future<Output = Result<EmbedResult, LlmError>> + Send + 'a>> {
-        self.embed_calls.lock().unwrap().push(texts.to_vec());
-        let reply = self.embed_replies.lock().unwrap().pop().unwrap_or_else(|| {
-            // Permissive default: zero vectors so unrelated tests that
-            // don't care about embedding values still work.
-            Ok(EmbedResult {
-                model: "mock-default".into(),
-                embeddings: texts.iter().map(|_| Embedding(vec![0.0; 4])).collect(),
-            })
-        });
-        Box::pin(async move { reply })
+    fn name(&self) -> &str {
+        "mock"
     }
 
     fn chat<'a>(
@@ -80,6 +68,24 @@ impl Provider for MockProvider {
             Ok(ChatResponse {
                 model: "mock-default".into(),
                 content: "[mock-default reply]".into(),
+            })
+        });
+        Box::pin(async move { reply })
+    }
+}
+
+impl EmbeddingProvider for MockProvider {
+    fn embed<'a>(
+        &'a self,
+        texts: &'a [String],
+    ) -> Pin<Box<dyn Future<Output = Result<EmbedResult, LlmError>> + Send + 'a>> {
+        self.embed_calls.lock().unwrap().push(texts.to_vec());
+        let reply = self.embed_replies.lock().unwrap().pop().unwrap_or_else(|| {
+            // Permissive default: zero vectors so unrelated tests that
+            // don't care about embedding values still work.
+            Ok(EmbedResult {
+                model: "mock-default".into(),
+                embeddings: texts.iter().map(|_| Embedding(vec![0.0; 4])).collect(),
             })
         });
         Box::pin(async move { reply })

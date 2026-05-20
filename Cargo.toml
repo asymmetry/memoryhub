@@ -9,6 +9,7 @@ _test = []
 
 [dependencies]
 acktor = "1.1"
+ahash = "0.8"
 anyhow = "1.0"
 axum = "0.8"
 chrono = { version = "0.4", features = ["serde"] }
@@ -42,3 +43,7 @@ clawchorus = { path = ".", features = ["_test"] }
 tempfile = "3"
 tower = "0.5"
 wiremock = "0.6"
+
+[[test]]
+name = "http_server"
+required-features = ["_test"]

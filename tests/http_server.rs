@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use acktor::{Actor, Address, Signal};
 use axum::{
     body::{Body, to_bytes},
@@ -10,7 +8,7 @@ use tower::ServiceExt;
 use clawchorus::{
     config::ServerConfig,
     http::{HttpServer, HttpServerState, build_router},
-    llm::{LlmService, provider::mock::MockProvider},
+    llm::{LlmConfig, LlmService},
     memory::{MemoryManager, config::MemoryConfig},
 };
 
@@ -23,9 +21,12 @@ fn test_config(dir: &std::path::Path) -> MemoryConfig {
 }
 
 async fn spawn_memory_manager(dir: &std::path::Path) -> Address<MemoryManager> {
-    let provider = Arc::new(MockProvider::new());
-    let llm = LlmService::new(Default::default(), provider);
-    let (llm_addr, _llm_handle) = llm.start("llm-test").unwrap();
+    let llm_cfg = LlmConfig {
+        provider: "mock".into(),
+        embedding_provider: "mock".into(),
+        ..Default::default()
+    };
+    let (llm_addr, _llm_handle) = LlmService::new(llm_cfg).start("llm-test").unwrap();
     let mm = MemoryManager::new(test_config(dir), llm_addr).unwrap();
     let (mm_addr, _mm_handle) = mm.start("memory-manager").unwrap();
     Box::leak(Box::new(_mm_handle));

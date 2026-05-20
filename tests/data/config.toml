@@ -12,9 +12,11 @@ hybrid_weight = 0.5
 
 [llm]
 provider = "deepseek"
+embedding_provider = "openai"
 api_key_env = "DEEPSEEK_API_KEY"
+embedding_api_key_env = "OPENAI_API_KEY"
 model = "deepseek-chat"
-embedding_model = "deepseek-embedding"
+embedding_model = "text-embedding-3-small"
 
 [agent]
 enabled = false

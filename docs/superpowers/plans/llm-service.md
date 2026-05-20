@@ -4,7 +4,7 @@
 
 **Goal:** Bring the LLM service to its final form — two cleanly separated capabilities (embedding and synthesis), synthesis owning prompt engineering and conversation context behind a `Synthesize` message, and the Synthesizer rewired to feed only changed files. This plan supersedes the earlier LLM service plan and is written against the current codebase, which already has the stub-replacement implementation in place.
 
-**Architecture:** `LlmService` stays the single entry point. It spawns one long-lived `Embedder` child and one long-lived `SynthesisTask` child per synthesis target (per-user / overall). `SynthesisTask` preserves conversation context across cool-down cycles, hot-reloads Markdown prompt templates from disk, and reseeds from a caller-supplied prior summary on cold start or context reset. The Synthesizer no longer drives LLM sessions — it reads changed files and prior summaries from Storage, calls `Synthesize`, and writes results back.
+**Architecture:** `LlmService` stays the single entry point. It spawns one long-lived `Embedder` child and one long-lived `SynthesisTask` child per synthesis target (per-user / global). `SynthesisTask` preserves conversation context across cool-down cycles, hot-reloads Markdown prompt templates from disk, and reseeds from a caller-supplied prior summary on cold start or context reset. The Synthesizer no longer drives LLM sessions — it reads changed files and prior summaries from Storage, calls `Synthesize`, and writes results back.
 
 **Tech Stack:** Rust 2024, `acktor` actor framework, `tokio`, `reqwest`. Tests use the in-crate `MockProvider` (enabled by the `_test` feature via dev-dependencies).
 
@@ -26,7 +26,7 @@
 - `src/llm/embedder.rs` — `Embedder` actor; owns `provider.embed`.
 - `src/llm/synthesis.rs` — `SynthesisTask` actor, `SynthesisTarget`, `SourceDoc`, `Synthesize` message.
 - `src/llm/template.rs` — `TemplateKind` + `load_template` (provider-specific resolution, hot-reload).
-- `prompts/per_user.md`, `prompts/overall.md` — default synthesis prompt templates.
+- `prompts/per_user.md`, `prompts/global.md` — default synthesis prompt templates.
 
 **Modified:**
 - `src/llm/provider.rs` — add `name()` to the `Provider` trait.
@@ -35,7 +35,7 @@
 - `src/llm/config.rs` — add `prompts_dir`, `synthesis_context_max_chars`; rename `session_idle_timeout_secs` → `synthesis_idle_timeout_secs`.
 - `src/llm.rs` — `Embedder` wiring, `Synthesize` handler, `TaskDied` internal message; `LlmService::new` returns `Result`; remove `StartSession`.
 - `src/manager.rs` — adjust the `LlmService::new` call site.
-- `src/memory/path.rs` — replace `derive_synthesis_path` with `per_user_synthesis_path` / `overall_synthesis_path`.
+- `src/memory/path.rs` — replace `derive_synthesis_path` with `per_user_synthesis_path` / `global_synthesis_path`.
 - `src/memory/synthesizer.rs` — rewrite `process()` as a two-pass flow over `Synthesize`.
 - `src/memory/manager.rs` — fix a test path assertion and a `LlmService::new` call site.
 
@@ -291,7 +291,7 @@ git commit -m "feat(llm): add synthesis config fields, rename idle timeout"
 
 **Files:**
 - Create: `src/llm/template.rs`
-- Create: `prompts/per_user.md`, `prompts/overall.md`
+- Create: `prompts/per_user.md`, `prompts/global.md`
 - Modify: `src/llm.rs` (register the module)
 
 - [ ] **Step 1: Register the module**
@@ -339,10 +339,10 @@ mod tests {
     #[test]
     fn falls_back_to_default_template() {
         let dir = tempfile::tempdir().unwrap();
-        write(dir.path(), "overall.md", "default overall");
+        write(dir.path(), "global.md", "default global");
 
-        let out = load_template(dir.path(), "deepseek", TemplateKind::Overall).unwrap();
-        assert_eq!(out, "default overall");
+        let out = load_template(dir.path(), "deepseek", TemplateKind::Global).unwrap();
+        assert_eq!(out, "default global");
     }
 
     #[test]
@@ -368,14 +368,14 @@ In `src/llm/template.rs`, insert above the `#[cfg(test)]` module:
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TemplateKind {
     PerUser,
-    Overall,
+    Global,
 }
 
 impl TemplateKind {
     fn filename(self) -> &'static str {
         match self {
             TemplateKind::PerUser => "per_user.md",
-            TemplateKind::Overall => "overall.md",
+            TemplateKind::Global => "global.md",
         }
     }
 }
@@ -424,26 +424,26 @@ contradictions in favor of the most recent document.
 Reply with the complete updated summary as Markdown, and nothing else.
 ```
 
-Create `prompts/overall.md`:
+Create `prompts/global.md`:
 
 ```markdown
 You are a memory synthesizer for an organization. You maintain a running,
 cross-user summary that captures shared knowledge, overlapping work, and
 team-wide themes.
 
-You will receive the current overall summary (if any) followed by updated
+You will receive the current global summary (if any) followed by updated
 per-user summaries. Fold them together: highlight what is common across
 users, surface connections between their work, and keep individual detail
 only where it matters organization-wide.
 
-Reply with the complete updated overall summary as Markdown, and nothing else.
+Reply with the complete updated global summary as Markdown, and nothing else.
 ```
 
 - [ ] **Step 7: Format and commit**
 
 ```bash
 cargo fmt
-git add src/llm.rs src/llm/template.rs prompts/per_user.md prompts/overall.md
+git add src/llm.rs src/llm/template.rs prompts/per_user.md prompts/global.md
 git commit -m "feat(llm): add prompt template module and default templates"
 ```
 
@@ -797,7 +797,7 @@ pub enum SynthesisTarget {
     /// Per-user synthesis; the `String` is the username.
     User(String),
     /// Cross-user synthesis.
-    Overall,
+    Global,
 }
 
 impl SynthesisTarget {
@@ -805,7 +805,7 @@ impl SynthesisTarget {
     pub fn template_kind(&self) -> TemplateKind {
         match self {
             SynthesisTarget::User(_) => TemplateKind::PerUser,
-            SynthesisTarget::Overall => TemplateKind::Overall,
+            SynthesisTarget::Global => TemplateKind::Global,
         }
     }
 
@@ -813,7 +813,7 @@ impl SynthesisTarget {
     pub fn label(&self) -> String {
         match self {
             SynthesisTarget::User(u) => format!("synth-user-{u}"),
-            SynthesisTarget::Overall => "synth-overall".to_string(),
+            SynthesisTarget::Global => "synth-global".to_string(),
         }
     }
 }
@@ -1311,15 +1311,15 @@ In `src/memory/path.rs`, add to the `tests` module:
     }
 
     #[test]
-    fn overall_synthesis_path_is_top_level() {
-        assert_eq!(overall_synthesis_path(), "_synthesized/summary.md");
+    fn global_synthesis_path_is_top_level() {
+        assert_eq!(global_synthesis_path(), "_synthesized/summary.md");
     }
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
 
 Run: `cargo test -p clawchorus --lib path::`
-Expected: FAIL — compile error, `per_user_synthesis_path` / `overall_synthesis_path` undefined.
+Expected: FAIL — compile error, `per_user_synthesis_path` / `global_synthesis_path` undefined.
 
 - [ ] **Step 3: Add the helpers**
 
@@ -1334,8 +1334,8 @@ pub fn per_user_synthesis_path(username: &str) -> String {
     format!("{}/_synthesized/summary.md", username)
 }
 
-/// Overall (cross-user) synthesized summary path: `_synthesized/summary.md`.
-pub fn overall_synthesis_path() -> String {
+/// Global (cross-user) synthesized summary path: `_synthesized/summary.md`.
+pub fn global_synthesis_path() -> String {
     "_synthesized/summary.md".to_string()
 }
 ```
@@ -1409,7 +1409,7 @@ Replace lines 1-27 of `src/memory/synthesizer.rs` (doc comment through the `use`
 //! Receives fire-and-forget `FileChanged` notifications, batches them with a
 //! cool-down timer, then runs a two-pass synthesis. The per-user pass folds
 //! each affected user's changed files into that user's running summary; the
-//! overall pass folds the changed per-user summaries into a cross-user
+//! global pass folds the changed per-user summaries into a cross-user
 //! summary. Synthesis itself is delegated to LLM Service via `Synthesize`;
 //! this actor only reads sources, writes results, and indexes them.
 
@@ -1426,7 +1426,7 @@ use crate::memory::{
     error::MemoryError,
     index::Index,
     messages::{Chunk, EnsureVecReady, FileChanged, IndexInsert, StorageRead, StorageWrite},
-    path::{overall_synthesis_path, per_user_synthesis_path},
+    path::{global_synthesis_path, per_user_synthesis_path},
     storage::Storage,
 };
 ```
@@ -1486,10 +1486,10 @@ impl Synthesizer {
             }
         }
 
-        // Overall pass.
+        // Global pass.
         if !changed_users.is_empty() {
-            if let Err(e) = self.synthesize_overall(&changed_users).await {
-                warn!("Synthesizer: overall synthesis failed: {}", e);
+            if let Err(e) = self.synthesize_global(&changed_users).await {
+                warn!("Synthesizer: global synthesis failed: {}", e);
             }
         }
     }
@@ -1530,7 +1530,7 @@ impl Synthesizer {
     }
 
     /// Synthesize the cross-user summary from the changed per-user summaries.
-    async fn synthesize_overall(&self, changed_users: &[String]) -> Result<(), MemoryError> {
+    async fn synthesize_global(&self, changed_users: &[String]) -> Result<(), MemoryError> {
         let mut sources = Vec::new();
         for user in changed_users {
             let path = per_user_synthesis_path(user);
@@ -1542,13 +1542,13 @@ impl Synthesizer {
             return Ok(());
         }
 
-        let summary_path = overall_synthesis_path();
+        let summary_path = global_synthesis_path();
         let prior_summary = self.storage_read(&summary_path).await?;
         let synthesis = self
-            .request_synthesis(SynthesisTarget::Overall, prior_summary, sources)
+            .request_synthesis(SynthesisTarget::Global, prior_summary, sources)
             .await?;
         self.write_synthesis(&summary_path, &synthesis).await?;
-        info!("Synthesizer: overall synthesis written to {}", summary_path);
+        info!("Synthesizer: global synthesis written to {}", summary_path);
         Ok(())
     }
 
@@ -1738,7 +1738,7 @@ In `src/llm.rs`:
 
 - [ ] **Step 3: Remove `derive_synthesis_path` from `src/memory/path.rs`**
 
-In `src/memory/path.rs`, delete the `derive_synthesis_path` function and the two tests that use it (`per_user_synthesis_path` — the old test at line 69 named `per_user_synthesis_path`, and `cross_user_synthesis_path`). Keep the new `per_user_synthesis_path_has_no_memory_type` and `overall_synthesis_path_is_top_level` tests added in Task 7.
+In `src/memory/path.rs`, delete the `derive_synthesis_path` function and the two tests that use it (`per_user_synthesis_path` — the old test at line 69 named `per_user_synthesis_path`, and `cross_user_synthesis_path`). Keep the new `per_user_synthesis_path_has_no_memory_type` and `global_synthesis_path_is_top_level` tests added in Task 7.
 
 Note: there is an old test named `per_user_synthesis_path` (testing `derive_synthesis_path`) and a new function named `per_user_synthesis_path`. Deleting the old test removes the name clash.
 
@@ -1799,5 +1799,5 @@ Otherwise, no commit.
 
 - **Spec coverage:** `Embedder` (Task 4), `SynthesisTask` + `Synthesize` + `SynthesisTarget` + `SourceDoc` (Task 5), `LlmService` routing + `TaskDied` supervision (Task 6), prompt templates with provider override + hot-reload (Task 3), config fields incl. rename (Task 2), `Provider::name()` (Task 1), two-pass Synthesizer feeding only changed files (Task 8), stable summary paths without the `memory_type` segment (Task 7), removal of the generic `Session` API (Task 9). All `llm-service-design.md` and the Synthesizer section of `memory-manager-design.md` are covered.
 - **Reset-and-reseed:** unified in `SynthesisTask::handle` — an empty `history` (cold start, post-restart, post-reset) reseeds from `prior_summary`; the Synthesizer always supplies the current on-disk summary.
-- **Type consistency:** `Synthesize { target, prior_summary, sources }`, `SourceDoc { name, content }`, `SynthesisTarget::{User, Overall}`, `TemplateKind::{PerUser, Overall}`, `load_template(prompts_dir, provider_name, kind)`, `SynthesisTask::new(provider, kind, prompts_dir, idle_timeout, max_retries, context_max_chars)`, `Embedder::new(provider, max_retries)`, `LlmService::new(config, provider) -> Result<Self, LlmError>` — used identically across Tasks 5, 6, and 8.
+- **Type consistency:** `Synthesize { target, prior_summary, sources }`, `SourceDoc { name, content }`, `SynthesisTarget::{User, Global}`, `TemplateKind::{PerUser, Global}`, `load_template(prompts_dir, provider_name, kind)`, `SynthesisTask::new(provider, kind, prompts_dir, idle_timeout, max_retries, context_max_chars)`, `Embedder::new(provider, max_retries)`, `LlmService::new(config, provider) -> Result<Self, LlmError>` — used identically across Tasks 5, 6, and 8.
 - **Compile-safety:** `Session`/`StartSession` and `derive_synthesis_path` are kept until Task 9; every task leaves the crate building and the suite green.

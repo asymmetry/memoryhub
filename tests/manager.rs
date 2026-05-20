@@ -21,6 +21,7 @@ fn test_config(dir: &std::path::Path) -> Config {
         },
         llm: LlmConfig {
             provider: "mock".to_string(),
+            embedding_provider: "mock".to_string(),
             ..LlmConfig::default()
         },
         ..Config::default()

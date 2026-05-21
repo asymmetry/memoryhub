@@ -2,7 +2,7 @@
 
 ## Overview
 
-The Memory Manager actor manages memory storage, metadata, and search within ClawChorus. It is a child actor of the Manager supervisor and holds references to the LLM Service actor for embedding operations.
+The Memory Manager actor manages memory storage, metadata, and search within MemoryHub. It is a child actor of the Manager supervisor and holds references to the LLM Service actor for embedding operations.
 
 ## Actor Hierarchy
 

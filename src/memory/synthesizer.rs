@@ -19,7 +19,7 @@ use tracing::{debug, info, trace, warn};
 use super::chunking::chunk_text;
 use super::config::MemoryConfig;
 use super::error::MemoryError;
-use super::index::Index;
+use super::indexer::Indexer;
 use super::message::{Chunk, EnsureVecReady, FileChanged, IndexInsert, StorageRead, StorageWrite};
 use super::path::{current_synthesis_path, get_latest_synthesis_file};
 use super::storage::Storage;
@@ -32,7 +32,7 @@ struct CooldownTick;
 pub struct Synthesizer {
     llm: Address<LlmService>,
     storage: Address<Storage>,
-    index: Address<Index>,
+    index: Address<Indexer>,
     config: MemoryConfig,
     pending: BTreeSet<String>,
     last_event: Option<Instant>,
@@ -42,7 +42,7 @@ impl Synthesizer {
     pub fn new(
         llm: Address<LlmService>,
         storage: Address<Storage>,
-        index: Address<Index>,
+        index: Address<Indexer>,
         config: MemoryConfig,
     ) -> Self {
         Self {
@@ -196,7 +196,7 @@ impl Synthesizer {
         Ok(())
     }
 
-    /// Chunk, embed, and write a synthesized document to Storage and Index.
+    /// Chunk, embed, and write a synthesized document to Storage and Indexer.
     async fn write_synthesis(&self, path: &str, content: &str) -> Result<(), MemoryError> {
         self.storage_write(path, content).await?;
 
@@ -337,18 +337,18 @@ mod tests {
 
     use super::*;
     use crate::llm::LlmService;
-    use crate::memory::{index::Index, message::StorageWrite, storage::Storage};
+    use crate::memory::{indexer::Indexer, message::StorageWrite, storage::Storage};
 
     async fn boot() -> (
         Address<Storage>,
-        Address<Index>,
+        Address<Indexer>,
         Address<LlmService>,
         tempfile::TempDir,
         Vec<JoinHandle<()>>,
     ) {
         let dir = tempfile::tempdir().unwrap();
         let (storage, h1) = Storage::new(PathBuf::from(dir.path())).start("s").unwrap();
-        let (index, h2) = Index::open_in_memory().unwrap().start("i").unwrap();
+        let (index, h2) = Indexer::open_in_memory().unwrap().start("i").unwrap();
         let llm_cfg = crate::llm::LlmConfig {
             provider: "mock".into(),
             embedding_provider: "mock".into(),

@@ -148,7 +148,7 @@ fn next_filename(current: &str, today: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use tokio::fs;
+    use std::fs;
 
     use super::*;
 
@@ -208,10 +208,8 @@ mod tests {
     async fn synthesis_path_reuses_existing_dated_file_under_cap() {
         let dir = tempfile::tempdir().unwrap();
         let folder = dir.path().join("alice").join("_synthesized");
-        fs::create_dir_all(&folder).await.unwrap();
-        fs::write(folder.join("2026-05-20-01.md"), b"short")
-            .await
-            .unwrap();
+        fs::create_dir_all(&folder).unwrap();
+        fs::write(folder.join("2026-05-20-01.md"), b"short").unwrap();
 
         let path = current_synthesis_path(
             dir.path(),
@@ -227,13 +225,9 @@ mod tests {
     async fn synthesis_path_rolls_over_increments_suffix() {
         let dir = tempfile::tempdir().unwrap();
         let folder = dir.path().join("alice").join("_synthesized");
-        fs::create_dir_all(&folder).await.unwrap();
-        fs::write(folder.join("2026-05-20-01.md"), vec![b'x'; 1024])
-            .await
-            .unwrap();
-        fs::write(folder.join("2026-05-20-02.md"), vec![b'x'; 1024])
-            .await
-            .unwrap();
+        fs::create_dir_all(&folder).unwrap();
+        fs::write(folder.join("2026-05-20-01.md"), vec![b'x'; 1024]).unwrap();
+        fs::write(folder.join("2026-05-20-02.md"), vec![b'x'; 1024]).unwrap();
 
         let path = current_synthesis_path(
             dir.path(),
@@ -249,10 +243,8 @@ mod tests {
     async fn synthesis_path_starts_fresh_on_new_date() {
         let dir = tempfile::tempdir().unwrap();
         let folder = dir.path().join("alice").join("_synthesized");
-        fs::create_dir_all(&folder).await.unwrap();
-        fs::write(folder.join("2026-05-19-01.md"), vec![b'x'; 1024])
-            .await
-            .unwrap();
+        fs::create_dir_all(&folder).unwrap();
+        fs::write(folder.join("2026-05-19-01.md"), vec![b'x'; 1024]).unwrap();
 
         let path = current_synthesis_path(
             dir.path(),
@@ -268,16 +260,10 @@ mod tests {
     async fn latest_synthesis_path_picks_lexicographic_max() {
         let dir = tempfile::tempdir().unwrap();
         let folder = dir.path().join("alice").join("_synthesized");
-        fs::create_dir_all(&folder).await.unwrap();
-        fs::write(folder.join("2026-05-19-01.md"), b"a")
-            .await
-            .unwrap();
-        fs::write(folder.join("2026-05-20-01.md"), b"b")
-            .await
-            .unwrap();
-        fs::write(folder.join("2026-05-20-02.md"), b"c")
-            .await
-            .unwrap();
+        fs::create_dir_all(&folder).unwrap();
+        fs::write(folder.join("2026-05-19-01.md"), b"a").unwrap();
+        fs::write(folder.join("2026-05-20-01.md"), b"b").unwrap();
+        fs::write(folder.join("2026-05-20-02.md"), b"c").unwrap();
 
         let path =
             get_latest_synthesis_file(dir.path(), &SynthesisTarget::User("alice".into())).await;

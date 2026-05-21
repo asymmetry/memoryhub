@@ -26,7 +26,7 @@ pub struct Chunk {
     pub embedding: Embedding,
 }
 
-/// A single search result returned from the Index.
+/// A single search result returned from the Indexer.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SearchResult {
     pub path: String,
@@ -63,7 +63,7 @@ pub struct StorageDelete {
 }
 
 // ---------------------------------------------------------------------------
-// Index messages
+// Indexer messages
 // ---------------------------------------------------------------------------
 
 /// Insert or replace a file's chunks in the index.

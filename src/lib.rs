@@ -6,4 +6,4 @@ pub mod llm;
 pub mod memory;
 
 mod manager;
-pub use manager::ClawChorus;
+pub use manager::MemoryHub;

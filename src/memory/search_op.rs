@@ -1,20 +1,20 @@
 //! Search Actor.
 //!
 //! Spawned by the Memory Manager for each incoming Search message. Chunks the query, embeds via
-//! the LLM Service, searches the Index, then terminates.
+//! the LLM Service, searches the Indexer, then terminates.
 
 use acktor::{Actor, Address, Context, Handler, utils::debug_trace};
 
 use super::chunking::chunk_text;
 use super::error::MemoryError;
-use super::index::Index;
+use super::indexer::Indexer;
 use super::message::{IndexSearch, Search, SearchResult};
 use crate::llm::{Embed, LlmService};
 
 /// A short-lived actor that handles a single Search request.
 pub struct SearchOp {
     llm: Address<LlmService>,
-    index: Address<Index>,
+    index: Address<Indexer>,
     chunk_size: usize,
     chunk_overlap: usize,
 }
@@ -22,7 +22,7 @@ pub struct SearchOp {
 impl SearchOp {
     pub fn new(
         llm: Address<LlmService>,
-        index: Address<Index>,
+        index: Address<Indexer>,
         chunk_size: usize,
         chunk_overlap: usize,
     ) -> Self {

@@ -1,10 +1,10 @@
-# ClawChorus Design Spec
+# MemoryHub Design Spec
 
 ## Context
 
 OpenClaw is an open-source personal AI agent that stores memories as local Markdown files. In a team or company setting, each person's OpenClaw builds knowledge in isolation — there is no way to share, aggregate, or synthesize memories across users.
 
-ClawChorus is a centralized memory management and sharing service that pools individual OpenClaw memories into a unified organizational knowledge base. It collects raw memories from agents, embeds them for semantic search, and runs an event-driven synthesizer to produce cross-user insights.
+MemoryHub is a centralized memory management and sharing service that pools individual OpenClaw memories into a unified organizational knowledge base. It collects raw memories from agents, embeds them for semantic search, and runs an event-driven synthesizer to produce cross-user insights.
 
 ## Architecture
 

@@ -48,12 +48,12 @@ pub struct LlmConfig {
     pub embedding_base_url: String,
 }
 
-/// Default prompts directory: `~/.clawchorus/prompts`.
+/// Default prompts directory: `~/.memoryhub/prompts`.
 fn default_prompts_dir() -> PathBuf {
     match dirs::home_dir() {
-        Some(home) => home.join(".clawchorus").join("prompts"),
+        Some(home) => home.join(".memoryhub").join("prompts"),
         None => {
-            let fallback = std::env::temp_dir().join("clawchorus").join("prompts");
+            let fallback = std::env::temp_dir().join("memoryhub").join("prompts");
             warn!(
                 "Could not resolve home directory; using temp dir for prompts: {}",
                 fallback.display()
@@ -123,8 +123,8 @@ mod tests {
         assert_eq!(c.request_timeout_secs, default_request_timeout_secs());
         assert_eq!(c.base_url, default_base_url());
         assert!(
-            c.prompts_dir.ends_with(".clawchorus/prompts"),
-            "expected default prompts_dir to end with .clawchorus/prompts, got {:?}",
+            c.prompts_dir.ends_with(".memoryhub/prompts"),
+            "expected default prompts_dir to end with .memoryhub/prompts, got {:?}",
             c.prompts_dir
         );
         assert_eq!(
@@ -150,8 +150,8 @@ embedding_model = "text-embedding-3-small"
             default_synthesis_idle_timeout_secs()
         );
         assert!(
-            c.prompts_dir.ends_with(".clawchorus/prompts"),
-            "expected default prompts_dir to end with .clawchorus/prompts, got {:?}",
+            c.prompts_dir.ends_with(".memoryhub/prompts"),
+            "expected default prompts_dir to end with .memoryhub/prompts, got {:?}",
             c.prompts_dir
         );
         assert_eq!(

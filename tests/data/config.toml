@@ -17,8 +17,3 @@ api_key_env = "DEEPSEEK_API_KEY"
 embedding_api_key_env = "OPENAI_API_KEY"
 model = "deepseek-chat"
 embedding_model = "text-embedding-3-small"
-
-[agent]
-enabled = false
-interval_secs = 60
-similarity_threshold = 0.75

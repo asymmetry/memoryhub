@@ -1,12 +1,12 @@
-# ClawChorus
+# MemoryHub
 
 Centralized memory service for OpenClaw teams: pools raw Markdown from per-user agents, embeds them, and runs a synthesizer for per-user and cross-user summaries.
 
-Design lives in `docs/` — start with `docs/clawchorus-design.md`.
+Design lives in `docs/` — start with `docs/memoryhub-design.md`.
 
 ## Layout
 
-Single Rust binary on the `acktor` actor framework (Tokio). `ClawChorus` (`src/manager.rs`) supervises three children:
+Single Rust binary on the `acktor` actor framework (Tokio). `MemoryHub` (`src/manager.rs`) supervises three children:
 
 - `src/http/` — Axum REST, forwards to `MemoryManager`. Routes under `/v1/*`.
 - `src/memory/` — `Storage`, `Index` (SQLite + sqlite-vec + FTS5), `Synthesizer`, plus per-request `FileOp` / `SearchOp`.
@@ -28,5 +28,5 @@ Single Rust binary on the `acktor` actor framework (Tokio). `ClawChorus` (`src/m
 ```
 cargo fmt    # required after editing any .rs file
 cargo clippy
-cargo test --features _test    # tests
+cargo test   # tests
 ```

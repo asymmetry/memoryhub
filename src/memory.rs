@@ -1,15 +1,12 @@
-//! Memory actor sub-system for ClawChorus.
+//! Memory actor sub-system for MemoryHub.
 //!
-//! The memory manager owns Storage, Index, and Synthesizer child actors.
+//! The memory manager owns Storage, Indexer, and Synthesizer child actors.
 //! See the actor handler modules in this directory.
 
-pub mod chunking;
 pub mod error;
-pub mod index;
-mod path;
 
-pub mod storage;
-pub mod synthesizer;
+mod chunking;
+mod path;
 
 mod manager;
 pub use manager::MemoryManager;
@@ -24,3 +21,12 @@ pub use file_op::FileOp;
 
 mod search_op;
 pub use search_op::SearchOp;
+
+mod storage;
+pub use storage::Storage;
+
+mod indexer;
+pub use indexer::Indexer;
+
+mod synthesizer;
+pub use synthesizer::Synthesizer;

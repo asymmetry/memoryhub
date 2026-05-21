@@ -1,4 +1,4 @@
-//! Error types for ClawChorus.
+//! Error types for MemoryHub.
 //!
 //! Module-specific errors live in their respective sub-modules.
 //! This module defines top-level errors and re-exports sub-module errors.
@@ -30,9 +30,9 @@ pub enum ConfigError {
     NoHomeDir,
 }
 
-/// Top-level error for the [`crate::ClawChorus`] actor.
+/// Top-level error for the [`crate::MemoryHub`] actor.
 #[derive(Debug, Error)]
-pub enum ClawChorusError {
+pub enum MemoryHubError {
     #[error(transparent)]
     Llm(#[from] LlmError),
 

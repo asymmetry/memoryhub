@@ -1,10 +1,10 @@
-//! Index and search text chunks.
+//! Indexer and search text chunks.
 //!
-//! The Index actor manages a SQLite database with two main tables: `files` and `chunks`. The
+//! The Indexer actor manages a SQLite database with two main tables: `files` and `chunks`. The
 //! `files` table tracks metadata about each file (path, source, size, updated_at). The `chunks`
 //! table stores the text chunks with their path, line numbers, and embedding model. A virtual
 //! FTS5 table `chunks_fts` enables full-text search on chunk text. A virtual table `chunks_vec`
-//! (sqlite-vec) stores the chunk embeddings for efficient vector search. The Index actor handles
+//! (sqlite-vec) stores the chunk embeddings for efficient vector search. The Indexer actor handles
 //! insert, delete, and search operations, running blocking DB operations in `spawn_blocking` to
 //! avoid blocking the async runtime.
 
@@ -18,12 +18,12 @@ use rusqlite::{Connection, params};
 use super::error::IndexError;
 use super::message::{EnsureVecReady, IndexDelete, IndexInsert, IndexSearch, SearchResult};
 
-/// The Index actor. Owns a shared SQLite connection.
-pub struct Index {
+/// The Indexer actor. Owns a shared SQLite connection.
+pub struct Indexer {
     conn: Arc<Mutex<Connection>>,
 }
 
-impl Index {
+impl Indexer {
     /// Opens an in-memory index. The vector table is created lazily on first insert via
     /// [`EnsureVecReady`].
     pub fn open_in_memory() -> Result<Self, IndexError> {
@@ -325,12 +325,12 @@ fn do_search(conn: &Connection, msg: &IndexSearch) -> Result<Vec<SearchResult>, 
 // Actor + Handler impls
 // ---------------------------------------------------------------------------
 
-impl Actor for Index {
+impl Actor for Indexer {
     type Context = Context<Self>;
     type Error = IndexError;
 }
 
-impl Handler<EnsureVecReady> for Index {
+impl Handler<EnsureVecReady> for Indexer {
     type Result = Result<(), IndexError>;
 
     async fn handle(
@@ -347,7 +347,7 @@ impl Handler<EnsureVecReady> for Index {
     }
 }
 
-impl Handler<IndexInsert> for Index {
+impl Handler<IndexInsert> for Indexer {
     type Result = Result<(), IndexError>;
 
     async fn handle(
@@ -364,7 +364,7 @@ impl Handler<IndexInsert> for Index {
     }
 }
 
-impl Handler<IndexDelete> for Index {
+impl Handler<IndexDelete> for Indexer {
     type Result = Result<(), IndexError>;
 
     async fn handle(
@@ -381,7 +381,7 @@ impl Handler<IndexDelete> for Index {
     }
 }
 
-impl Handler<IndexSearch> for Index {
+impl Handler<IndexSearch> for Indexer {
     type Result = Result<Vec<SearchResult>, IndexError>;
 
     async fn handle(
@@ -406,8 +406,8 @@ mod tests {
     use super::*;
     use crate::llm::Embedding;
 
-    fn test_index() -> Index {
-        Index::open_in_memory().unwrap()
+    fn test_index() -> Indexer {
+        Indexer::open_in_memory().unwrap()
     }
 
     #[tokio::test]

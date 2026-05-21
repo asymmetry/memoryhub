@@ -2,7 +2,7 @@
 
 ## Overview
 
-The `Manager` actor is ClawChorus's top-level supervisor. It owns the three sub-system actors — `LlmService`, `MemoryManager`, and `HttpServer` — supervises them, and tears the whole system down cleanly when any of them fails. It runs no business logic and receives no external traffic.
+The `Manager` actor is MemoryHub's top-level supervisor. It owns the three sub-system actors — `LlmService`, `MemoryManager`, and `HttpServer` — supervises them, and tears the whole system down cleanly when any of them fails. It runs no business logic and receives no external traffic.
 
 This iteration is **log-only**: there is no restart logic. Any child death stops the process; an operator restarts it.
 

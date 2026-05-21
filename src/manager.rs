@@ -9,12 +9,12 @@ use tokio::task::JoinHandle;
 use tracing::{debug, error, info, warn};
 
 use crate::config::Config;
-use crate::error::ClawChorusError;
+use crate::error::MemoryHubError;
 use crate::http::HttpServer;
 use crate::llm::LlmService;
 use crate::memory::MemoryManager;
 
-pub struct ClawChorus {
+pub struct MemoryHub {
     config: Config,
     llm: Option<Address<LlmService>>,
     memory: Option<Address<MemoryManager>>,
@@ -24,8 +24,8 @@ pub struct ClawChorus {
     http_handle: Option<JoinHandle<()>>,
 }
 
-impl ClawChorus {
-    /// Constructs the a new `ClawChorus` instance.
+impl MemoryHub {
+    /// Constructs the a new `MemoryHub` instance.
     pub fn new(config: Config) -> Self {
         Self {
             config,
@@ -39,11 +39,11 @@ impl ClawChorus {
     }
 }
 
-impl Actor for ClawChorus {
+impl Actor for MemoryHub {
     type Context = Context<Self>;
-    type Error = ClawChorusError;
+    type Error = MemoryHubError;
 
-    fn pre_start(&mut self, ctx: &mut Self::Context) -> Result<(), ClawChorusError> {
+    fn pre_start(&mut self, ctx: &mut Self::Context) -> Result<(), MemoryHubError> {
         let Config {
             server,
             memory,
@@ -76,13 +76,13 @@ impl Actor for ClawChorus {
         Ok(())
     }
 
-    async fn post_start(&mut self, _ctx: &mut Self::Context) -> Result<(), ClawChorusError> {
-        info!("ClawChorus is ready");
+    async fn post_start(&mut self, _ctx: &mut Self::Context) -> Result<(), MemoryHubError> {
+        info!("MemoryHub is ready");
 
         Ok(())
     }
 
-    async fn post_stop(&mut self, _ctx: &mut Self::Context) -> Result<(), ClawChorusError> {
+    async fn post_stop(&mut self, _ctx: &mut Self::Context) -> Result<(), MemoryHubError> {
         // Drain in reverse startup order: HTTP first (stop accepting work),
         // then MemoryManager (flush in-flight ops), then LLM.
         if let (Some(addr), Some(handle)) = (self.http.take(), self.http_handle.take()) {
@@ -101,7 +101,7 @@ impl Actor for ClawChorus {
     }
 }
 
-impl Handler<SupervisionEvent<MemoryManager>> for ClawChorus {
+impl Handler<SupervisionEvent<MemoryManager>> for MemoryHub {
     type Result = ();
 
     fn handle(
@@ -131,7 +131,7 @@ impl Handler<SupervisionEvent<MemoryManager>> for ClawChorus {
     }
 }
 
-impl Handler<SupervisionEvent<LlmService>> for ClawChorus {
+impl Handler<SupervisionEvent<LlmService>> for MemoryHub {
     type Result = ();
 
     fn handle(
@@ -161,7 +161,7 @@ impl Handler<SupervisionEvent<LlmService>> for ClawChorus {
     }
 }
 
-impl Handler<SupervisionEvent<HttpServer>> for ClawChorus {
+impl Handler<SupervisionEvent<HttpServer>> for MemoryHub {
     type Result = ();
 
     fn handle(

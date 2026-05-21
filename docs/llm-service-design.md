@@ -2,7 +2,7 @@
 
 ## Overview
 
-The LLM Service actor handles all outbound model API traffic for ClawChorus. It exposes two clearly separated capabilities — **embedding** text batches and **synthesizing** documents — and isolates provider-specific HTTP details behind two async traits, `Provider` (chat) and `EmbeddingProvider` (embeddings). It is a child of the top-level `Manager` supervisor, sibling to `MemoryManager` and the HTTP server.
+The LLM Service actor handles all outbound model API traffic for MemoryHub. It exposes two clearly separated capabilities — **embedding** text batches and **synthesizing** documents — and isolates provider-specific HTTP details behind two async traits, `Provider` (chat) and `EmbeddingProvider` (embeddings). It is a child of the top-level `Manager` supervisor, sibling to `MemoryManager` and the HTTP server.
 
 Embedding and synthesis are kept apart at every level: separate child actors, separate messages, separate provider traits. This split also lets a deployment pair a chat-only vendor (e.g. DeepSeek) with a different embeddings vendor (e.g. OpenAI).
 
@@ -208,7 +208,7 @@ Synthesis prompts live as Markdown files on disk so they can be changed without 
 - A template file is **static text** — the whole synthesis system prompt for that kind. There is no placeholder/interpolation mechanism; source documents are passed as chat messages, not spliced into the template.
 - **Default seeding:** on `LlmService::post_start`, `template::write_default_templates(prompts_dir)` creates `prompts_dir` if needed and writes the embedded defaults to `{prompts_dir}/per_user.md` and `{prompts_dir}/global.md` **only if those files do not already exist**, so user edits are preserved across restarts. Failure to seed is logged as a warning and does not fail startup — `load_template` still falls back to the embedded default.
 
-`prompts_dir` is configurable (see Config), default `~/.clawchorus/prompts` (falling back to a temp-dir path if the home directory cannot be resolved).
+`prompts_dir` is configurable (see Config), default `~/.memoryhub/prompts` (falling back to a temp-dir path if the home directory cannot be resolved).
 
 ## Retry Helper
 
@@ -260,7 +260,7 @@ pub embedding_model: String,
 pub embedding_dim: Option<usize>,              // pin to avoid surprises; None = auto-detect
 
 #[serde(default = "default_prompts_dir")]
-pub prompts_dir: PathBuf,                      // default "~/.clawchorus/prompts"
+pub prompts_dir: PathBuf,                      // default "~/.memoryhub/prompts"
 
 #[serde(default = "default_synthesis_idle_timeout_secs")]
 pub synthesis_idle_timeout_secs: u64,          // SynthesisTask idle timeout, default 300

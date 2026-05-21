@@ -2,6 +2,7 @@
 
 use std::io;
 
+use acktor::ErrorReport;
 use axum::{
     Json,
     http::StatusCode,
@@ -53,7 +54,7 @@ impl IntoResponse for HttpError {
             HttpError::Memory(e) => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "internal",
-                Some(e.to_string()),
+                Some(e.report()),
             ),
             HttpError::Unavailable(_) => (StatusCode::SERVICE_UNAVAILABLE, "unavailable", None),
         };

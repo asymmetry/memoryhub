@@ -38,8 +38,8 @@ fn default_synthesis_max_file_bytes() -> u64 {
 impl Default for MemoryConfig {
     fn default() -> Self {
         Self {
-            memory_dir: "~/.clawchorus/memory".to_string(),
-            db_path: "~/.clawchorus/clawchorus.db".to_string(),
+            memory_dir: "~/.memoryhub/memory".to_string(),
+            db_path: "~/.memoryhub/memoryhub.db".to_string(),
             chunk_size: 400,
             chunk_overlap: 80,
             temporal_decay_days: 30,
@@ -85,8 +85,8 @@ mod tests {
                 .memory_dir
                 .starts_with(home.to_string_lossy().as_ref())
         );
-        assert!(config.memory_dir.ends_with(".clawchorus/memory"));
-        assert!(config.db_path.ends_with(".clawchorus/clawchorus.db"));
+        assert!(config.memory_dir.ends_with(".memoryhub/memory"));
+        assert!(config.db_path.ends_with(".memoryhub/memoryhub.db"));
     }
 
     #[test]

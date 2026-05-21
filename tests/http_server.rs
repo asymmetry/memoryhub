@@ -5,7 +5,7 @@ use axum::{
 };
 use tower::ServiceExt;
 
-use clawchorus::{
+use memoryhub::{
     config::ServerConfig,
     http::{HttpServer, HttpServerState, build_router},
     llm::{LlmConfig, LlmService},

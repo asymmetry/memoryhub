@@ -2,7 +2,7 @@
 
 ## Overview
 
-The HTTP service exposes ClawChorus over a small JSON API consumed by OpenClaw agents. It is a thin Axum-based forwarder: each route deserializes a JSON body, sends one message to the `MemoryManager` actor, and serializes the reply. It owns no business logic and no state beyond the `MemoryManager` address.
+The HTTP service exposes MemoryHub over a small JSON API consumed by OpenClaw agents. It is a thin Axum-based forwarder: each route deserializes a JSON body, sends one message to the `MemoryManager` actor, and serializes the reply. It owns no business logic and no state beyond the `MemoryManager` address.
 
 ## Architecture
 

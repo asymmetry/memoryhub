@@ -1,8 +1,8 @@
 use std::time::Duration;
 
 use acktor::{Actor, Signal};
-use clawchorus::{
-    ClawChorus,
+use memoryhub::{
+    MemoryHub,
     config::{Config, LlmConfig, MemoryConfig, ServerConfig},
 };
 
@@ -24,14 +24,13 @@ fn test_config(dir: &std::path::Path) -> Config {
             embedding_provider: "mock".to_string(),
             ..LlmConfig::default()
         },
-        ..Config::default()
     }
 }
 
 #[tokio::test]
 async fn manager_starts_and_stops_cleanly() {
     let dir = tempfile::tempdir().unwrap();
-    let manager = ClawChorus::new(test_config(dir.path()));
+    let manager = MemoryHub::new(test_config(dir.path()));
     let (addr, handle) = manager.start("manager").unwrap();
 
     // Let pre_start spawn the children.
@@ -52,7 +51,7 @@ async fn manager_stops_itself_when_child_fails() {
     // which terminates it and notifies the Manager (its supervisor).
     config.server.host = "not-an-ip-address".to_string();
 
-    let manager = ClawChorus::new(config);
+    let manager = MemoryHub::new(config);
     let (_addr, handle) = manager.start("manager").unwrap();
 
     // HttpServer fails async; the Manager should see SupervisionEvent::Terminated,

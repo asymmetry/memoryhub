@@ -9,36 +9,36 @@ use crate::llm::Embedding;
 /// A `Provider` that records calls and replays scripted responses.
 #[derive(Default)]
 pub struct MockProvider {
-    pub embed_replies: Mutex<Vec<Result<EmbedResult, LlmError>>>,
+    pub chat_calls: Mutex<Vec<Vec<ChatMessage>>>,
     pub chat_replies: Mutex<Vec<Result<ChatResponse, LlmError>>>,
     pub embed_calls: Mutex<Vec<Vec<String>>>,
-    pub chat_calls: Mutex<Vec<Vec<ChatMessage>>>,
+    pub embed_replies: Mutex<Vec<Result<EmbedResult, LlmError>>>,
 }
 
 impl MockProvider {
     pub fn new() -> Self {
         Self {
-            embed_replies: Mutex::new(Vec::new()),
+            chat_calls: Mutex::new(Vec::new()),
             chat_replies: Mutex::new(Vec::new()),
             embed_calls: Mutex::new(Vec::new()),
-            chat_calls: Mutex::new(Vec::new()),
+            embed_replies: Mutex::new(Vec::new()),
         }
-    }
-
-    pub fn push_embed(&self, reply: Result<EmbedResult, LlmError>) {
-        self.embed_replies.lock().unwrap().push(reply);
     }
 
     pub fn push_chat(&self, reply: Result<ChatResponse, LlmError>) {
         self.chat_replies.lock().unwrap().push(reply);
     }
 
-    pub fn embed_call_count(&self) -> usize {
-        self.embed_calls.lock().unwrap().len()
+    pub fn push_embed(&self, reply: Result<EmbedResult, LlmError>) {
+        self.embed_replies.lock().unwrap().push(reply);
     }
 
     pub fn chat_call_count(&self) -> usize {
         self.chat_calls.lock().unwrap().len()
+    }
+
+    pub fn embed_call_count(&self) -> usize {
+        self.embed_calls.lock().unwrap().len()
     }
 
     pub fn last_chat_call(&self) -> Option<Vec<ChatMessage>> {

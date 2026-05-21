@@ -25,10 +25,10 @@ pub use provider::{EmbeddingProvider, Provider, build_providers};
 mod embedder;
 pub use embedder::Embedder;
 
-pub mod template;
-
-pub mod synthesis;
+mod synthesis;
 pub use synthesis::{SourceDoc, SynthesisTarget, SynthesisTask, Synthesize};
+
+pub mod template;
 
 /// A single embedding vector.
 #[derive(Debug)]

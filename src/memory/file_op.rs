@@ -1,14 +1,14 @@
 //! File operation actors.
 //!
 //! Spawned by the Memory Manager for each incoming FileOp message. Coordinates between Storage,
-//! Index, and the LLM Service, then terminates.
+//! Indexer, and the LLM Service, then terminates.
 
 use acktor::{Actor, Address, Context, ErrorReport, Handler, utils::debug_trace};
 use tracing::{error, warn};
 
 use super::chunking::chunk_text;
 use super::error::MemoryError;
-use super::index::Index;
+use super::indexer::Indexer;
 use super::message::{
     Chunk, EnsureVecReady, FileChanged, FileOpDelete, FileOpRead, FileOpWrite, IndexDelete,
     IndexInsert, StorageDelete, StorageRead, StorageWrite,
@@ -22,7 +22,7 @@ use crate::llm::{Embed, LlmService};
 pub struct FileOp {
     llm: Address<LlmService>,
     storage: Address<Storage>,
-    index: Address<Index>,
+    index: Address<Indexer>,
     synthesizer: Address<Synthesizer>,
     chunk_size: usize,
     chunk_overlap: usize,
@@ -33,7 +33,7 @@ impl FileOp {
     pub fn new(
         llm: Address<LlmService>,
         storage: Address<Storage>,
-        index: Address<Index>,
+        index: Address<Indexer>,
         synthesizer: Address<Synthesizer>,
         chunk_size: usize,
         chunk_overlap: usize,
@@ -109,7 +109,7 @@ impl Handler<FileOpWrite> for FileOp {
             self.index.send(EnsureVecReady { dim }).await?.await??;
         }
 
-        // 6. Insert into Index.
+        // 6. Insert into Indexer.
         let result = self
             .index
             .send(IndexInsert {
@@ -125,7 +125,7 @@ impl Handler<FileOpWrite> for FileOp {
         // 7. Rollback on failure.
         if let Err(e) = result {
             error!(
-                "Index insert for {storage_path} failed ({}); rolling back the storage write",
+                "Indexer insert for {storage_path} failed ({}); rolling back the storage write",
                 e.report()
             );
 
@@ -191,7 +191,7 @@ impl Handler<FileOpDelete> for FileOp {
 
         let storage_path = get_raw_path(&msg.username, msg.agent_id, &msg.filename);
 
-        // Delete from Index first.
+        // Delete from Indexer first.
         self.index
             .send(IndexDelete {
                 path: storage_path.clone(),

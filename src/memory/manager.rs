@@ -1,6 +1,6 @@
 //! Memory Manager Actor — supervisor for the memory sub-system.
 //!
-//! Spawns and supervises long-lived Storage and Index child actors.
+//! Spawns and supervises long-lived Storage and Indexer child actors.
 //! For each incoming FileOp or Search message, spawns a short-lived
 //! child actor to handle the request pipeline.
 
@@ -16,7 +16,7 @@ use tracing::info;
 use super::config::MemoryConfig;
 use super::error::MemoryError;
 use super::file_op::FileOp;
-use super::index::Index;
+use super::indexer::Indexer;
 use super::message::{FileOpDelete, FileOpRead, FileOpWrite, Search};
 use super::search_op::SearchOp;
 use super::storage::Storage;
@@ -31,7 +31,7 @@ pub struct MemoryManager {
     config: MemoryConfig,
     llm: Address<LlmService>,
     storage: Option<Address<Storage>>,
-    index: Option<Address<Index>>,
+    index: Option<Address<Indexer>>,
     synthesizer: Option<Address<Synthesizer>>,
     storage_handle: Option<JoinHandle<()>>,
     index_handle: Option<JoinHandle<()>>,
@@ -60,7 +60,7 @@ impl MemoryManager {
             .expect("MemoryManager: storage not started")
     }
 
-    fn index(&self) -> &Address<Index> {
+    fn index(&self) -> &Address<Indexer> {
         self.index
             .as_ref()
             .expect("MemoryManager: index not started")
@@ -113,9 +113,9 @@ impl Actor for MemoryManager {
         let (storage_addr, storage_handle) = Storage::new(memory_dir.clone()).start("storage")?;
 
         let index = if self.config.db_path == ":memory:" {
-            Index::open_in_memory()?
+            Indexer::open_in_memory()?
         } else {
-            Index::open(&PathBuf::from(&self.config.db_path))?
+            Indexer::open(&PathBuf::from(&self.config.db_path))?
         };
         let (index_addr, index_handle) = index.start("index")?;
 

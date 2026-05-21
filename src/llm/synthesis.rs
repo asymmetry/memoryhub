@@ -115,7 +115,7 @@ impl CronActor for SynthesisTask {
             debug!("SynthesisTask idle for {:?}, terminating", elapsed);
             ctx.terminate();
 
-            return Ok(Duration::from_secs(3600));
+            return Ok(Duration::ZERO);
         }
         let remaining = idle_timeout.saturating_sub(elapsed);
 

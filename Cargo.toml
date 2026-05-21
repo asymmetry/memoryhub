@@ -1,5 +1,5 @@
 [package]
-name = "clawchorus"
+name = "memoryhub"
 version = "0.1.0"
 edition = "2024"
 
@@ -39,11 +39,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = { version = "1.23", features = ["v4", "serde"] }
 
 [dev-dependencies]
-clawchorus = { path = ".", features = ["_test"] }
+memoryhub = { path = ".", features = ["_test"] }
 tempfile = "3"
 tower = "0.5"
 wiremock = "0.6"
-
-[[test]]
-name = "http_server"
-required-features = ["_test"]

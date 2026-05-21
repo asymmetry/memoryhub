@@ -35,7 +35,7 @@ pub enum MemoryError {
     Storage(#[from] StorageError),
 
     #[error(transparent)]
-    Index(#[from] IndexError),
+    Indexer(#[from] IndexError),
 
     #[error(transparent)]
     Llm(#[from] crate::llm::LlmError),

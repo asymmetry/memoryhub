@@ -1,20 +1,40 @@
 //! HTTP error type and response mapping.
 
-use axum::Json;
-use axum::http::StatusCode;
-use axum::response::{IntoResponse, Response};
+use std::io;
+
+use axum::{
+    Json,
+    http::StatusCode,
+    response::{IntoResponse, Response},
+};
 use serde::Serialize;
 use thiserror::Error;
 
 use crate::memory::error::MemoryError;
+
+/// Error type returned by the [`HttpServer`][super::HttpServer] actor itself (bind/listen
+/// errors).
+#[derive(Debug, Error)]
+pub enum HttpServerError {
+    #[error("bind error on {addr}: {source}")]
+    Bind { addr: String, source: io::Error },
+
+    #[error("invalid bind address {addr}: {source}")]
+    InvalidAddr {
+        addr: String,
+        source: std::net::AddrParseError,
+    },
+}
 
 /// Error type returned by HTTP handlers.
 #[derive(Debug, Error)]
 pub enum HttpError {
     #[error("not found")]
     NotFound,
-    #[error("memory error: {0}")]
+
+    #[error(transparent)]
     Memory(#[from] MemoryError),
+
     #[error("service unavailable: {0}")]
     Unavailable(String),
 }
@@ -50,8 +70,9 @@ impl IntoResponse for HttpError {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use axum::body::to_bytes;
+
+    use super::*;
 
     async fn body_string(resp: Response) -> (StatusCode, String) {
         let status = resp.status();
@@ -76,7 +97,7 @@ mod tests {
 
     #[tokio::test]
     async fn memory_error_maps_to_500_with_message() {
-        let err = HttpError::Memory(MemoryError::Actor("boom".to_string()));
+        let err = HttpError::Memory(MemoryError::SendError("boom".into()));
         let (status, body) = body_string(err.into_response()).await;
         assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
         assert!(body.contains(r#""error":"internal""#));

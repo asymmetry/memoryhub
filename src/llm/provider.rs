@@ -1,10 +1,6 @@
 //! Provider trait + helpers for LLM Service.
 //!
-//! Each provider (DeepSeek, OpenAI, ...) is a `Provider` impl. Providers are
-//! plain async types, not actors — `LlmService` owns one `Arc<dyn Provider>`
-//! at startup and clones it into in-flight futures and spawned sessions.
-
-pub mod deepseek;
+//! Each provider (DeepSeek, OpenAI, ...) is a `Provider` impl.
 
 use std::future::Future;
 use std::pin::Pin;
@@ -12,11 +8,18 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use rand::Rng;
-use tokio::time::sleep;
+use tokio::time;
 use tracing::warn;
 
-use crate::llm::config::LlmConfig;
-use crate::llm::{EmbedResult, LlmError};
+use super::config::LlmConfig;
+use super::{EmbedResult, LlmError};
+
+pub mod deepseek;
+pub mod openai;
+
+#[doc(hidden)]
+#[cfg(any(test, feature = "_test"))]
+pub mod mock;
 
 /// Role of a chat message.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -40,12 +43,11 @@ pub struct ChatResponse {
     pub content: String,
 }
 
-/// Abstract LLM provider. Implementations are plain async types (no actor).
+/// Abstract chat provider. Implementations are plain async types (no actor).
 pub trait Provider: Send + Sync + 'static {
-    fn embed<'a>(
-        &'a self,
-        texts: &'a [String],
-    ) -> Pin<Box<dyn Future<Output = Result<EmbedResult, LlmError>> + Send + 'a>>;
+    /// Short provider identifier, e.g. `"deepseek"`. Used to resolve provider-specific prompt
+    /// templates.
+    fn name(&self) -> &str;
 
     fn chat<'a>(
         &'a self,
@@ -53,16 +55,56 @@ pub trait Provider: Send + Sync + 'static {
     ) -> Pin<Box<dyn Future<Output = Result<ChatResponse, LlmError>> + Send + 'a>>;
 }
 
-/// Build a provider from config. Selects the impl by `config.provider`.
-pub fn build_provider(config: &LlmConfig) -> Result<Arc<dyn Provider>, LlmError> {
-    match config.provider.as_str() {
-        "deepseek" => Ok(Arc::new(deepseek::DeepSeekProvider::new(config)?)),
-        other => Err(LlmError::UnknownProvider(other.to_string())),
-    }
+/// Abstract embedding provider. Kept separate from [`Provider`] because not every chat vendor
+/// exposes an embeddings endpoint.
+pub trait EmbeddingProvider: Send + Sync + 'static {
+    fn embed<'a>(
+        &'a self,
+        texts: &'a [String],
+    ) -> Pin<Box<dyn Future<Output = Result<EmbedResult, LlmError>> + Send + 'a>>;
 }
 
-/// Retry `f` up to `max_attempts` total. Retries only on `LlmError::Transient`.
-/// Backoff: 250ms, 500ms, 1s — capped at 1s with full jitter.
+/// Builds chat and embedding providers from config.
+///
+/// When `provider == embedding_provider` and that provider supports both roles, a single
+/// instance is shared between both Arcs to avoid duplicate HTTP clients and credential reads.
+#[allow(clippy::type_complexity)]
+pub fn build_providers(
+    config: &LlmConfig,
+) -> Result<(Arc<dyn Provider>, Arc<dyn EmbeddingProvider>), LlmError> {
+    if config.provider == config.embedding_provider {
+        match config.provider.as_str() {
+            "openai" => {
+                let p = Arc::new(openai::OpenAiProvider::new(config)?);
+                return Ok((p.clone(), p));
+            }
+            #[cfg(any(test, feature = "_test"))]
+            "mock" => {
+                let p = Arc::new(mock::MockProvider::default());
+                return Ok((p.clone(), p));
+            }
+            _ => {}
+        }
+    }
+
+    let chat: Arc<dyn Provider> = match config.provider.as_str() {
+        "deepseek" => Arc::new(deepseek::DeepSeekProvider::new(config)?),
+        "openai" => Arc::new(openai::OpenAiProvider::new(config)?),
+        #[cfg(any(test, feature = "_test"))]
+        "mock" => Arc::new(mock::MockProvider::default()),
+        other => return Err(LlmError::UnknownProvider(other.to_string())),
+    };
+
+    let embedding: Arc<dyn EmbeddingProvider> = match config.embedding_provider.as_str() {
+        "openai" => Arc::new(openai::OpenAiProvider::new(config)?),
+        #[cfg(any(test, feature = "_test"))]
+        "mock" => Arc::new(mock::MockProvider::default()),
+        other => return Err(LlmError::UnknownProvider(other.to_string())),
+    };
+
+    Ok((chat, embedding))
+}
+
 pub(crate) async fn retry<F, Fut, T>(max_attempts: u32, mut f: F) -> Result<T, LlmError>
 where
     F: FnMut() -> Fut,
@@ -81,105 +123,14 @@ where
                     _ => 1000u64,
                 };
                 let jitter = rand::rng().random::<f64>();
-                let delay = Duration::from_millis((base_ms as f64 * jitter) as u64);
+                let delay = Duration::from_millis((base_ms as f64 * (0.5 + 0.5 * jitter)) as u64);
                 warn!(
                     attempt,
                     "transient LLM error, retrying in {:?}: {}", delay, msg
                 );
-                sleep(delay).await;
+                time::sleep(delay).await;
             }
             Err(e) => return Err(e),
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// MockProvider — used by tests in this crate and integration tests.
-// ---------------------------------------------------------------------------
-
-pub mod mock {
-    use std::sync::Mutex;
-
-    use crate::llm::Embedding;
-
-    use super::*;
-
-    /// A `Provider` that records calls and replays scripted responses.
-    pub struct MockProvider {
-        pub embed_replies: Mutex<Vec<Result<EmbedResult, LlmError>>>,
-        pub chat_replies: Mutex<Vec<Result<ChatResponse, LlmError>>>,
-        pub embed_calls: Mutex<Vec<Vec<String>>>,
-        pub chat_calls: Mutex<Vec<Vec<ChatMessage>>>,
-    }
-
-    impl MockProvider {
-        pub fn new() -> Self {
-            Self {
-                embed_replies: Mutex::new(Vec::new()),
-                chat_replies: Mutex::new(Vec::new()),
-                embed_calls: Mutex::new(Vec::new()),
-                chat_calls: Mutex::new(Vec::new()),
-            }
-        }
-
-        pub fn push_embed(&self, reply: Result<EmbedResult, LlmError>) {
-            self.embed_replies.lock().unwrap().push(reply);
-        }
-
-        pub fn push_chat(&self, reply: Result<ChatResponse, LlmError>) {
-            self.chat_replies.lock().unwrap().push(reply);
-        }
-
-        pub fn embed_call_count(&self) -> usize {
-            self.embed_calls.lock().unwrap().len()
-        }
-
-        pub fn chat_call_count(&self) -> usize {
-            self.chat_calls.lock().unwrap().len()
-        }
-
-        pub fn last_chat_call(&self) -> Option<Vec<ChatMessage>> {
-            self.chat_calls.lock().unwrap().last().cloned()
-        }
-
-        pub fn canned_embed(dim: usize, count: usize, model: &str) -> EmbedResult {
-            EmbedResult {
-                model: model.to_string(),
-                embeddings: (0..count).map(|_| Embedding(vec![0.1; dim])).collect(),
-            }
-        }
-    }
-
-    impl Provider for MockProvider {
-        fn embed<'a>(
-            &'a self,
-            texts: &'a [String],
-        ) -> Pin<Box<dyn Future<Output = Result<EmbedResult, LlmError>> + Send + 'a>> {
-            self.embed_calls.lock().unwrap().push(texts.to_vec());
-            let reply = self.embed_replies.lock().unwrap().pop().unwrap_or_else(|| {
-                // Permissive default: zero vectors so unrelated tests that
-                // don't care about embedding values still work.
-                Ok(EmbedResult {
-                    model: "mock-default".into(),
-                    embeddings: texts.iter().map(|_| Embedding(vec![0.0; 4])).collect(),
-                })
-            });
-            Box::pin(async move { reply })
-        }
-
-        fn chat<'a>(
-            &'a self,
-            messages: &'a [ChatMessage],
-        ) -> Pin<Box<dyn Future<Output = Result<ChatResponse, LlmError>> + Send + 'a>> {
-            self.chat_calls.lock().unwrap().push(messages.to_vec());
-            let reply = self.chat_replies.lock().unwrap().pop().unwrap_or_else(|| {
-                // Permissive default: a non-empty stub assistant reply.
-                Ok(ChatResponse {
-                    model: "mock-default".into(),
-                    content: "[mock-default reply]".into(),
-                })
-            });
-            Box::pin(async move { reply })
         }
     }
 }
@@ -243,12 +194,12 @@ mod tests {
     }
 
     #[test]
-    fn build_provider_rejects_unknown() {
+    fn build_providers_rejects_unknown_chat() {
         let cfg = LlmConfig {
             provider: "no-such".into(),
             ..LlmConfig::default()
         };
-        let err = build_provider(&cfg).map(|_| ()).unwrap_err();
+        let err = build_providers(&cfg).map(|_| ()).unwrap_err();
         assert!(matches!(err, LlmError::UnknownProvider(_)));
     }
 }

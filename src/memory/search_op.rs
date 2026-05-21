@@ -1,38 +1,34 @@
-//! Search Actor — short-lived per-request actor for the search pipeline.
+//! Search Actor.
 //!
-//! Spawned by the Memory Manager for each incoming Search message.
-//! Chunks the query, embeds via the LLM Service, searches the Index,
-//! then terminates.
+//! Spawned by the Memory Manager for each incoming Search message. Chunks the query, embeds via
+//! the LLM Service, searches the Index, then terminates.
 
-use acktor::{Actor, Address, Context, Handler};
-use tracing::trace;
+use acktor::{Actor, Address, Context, Handler, utils::debug_trace};
 
+use super::chunking::chunk_text;
+use super::error::MemoryError;
+use super::index::Index;
+use super::message::{IndexSearch, Search, SearchResult};
 use crate::llm::{Embed, LlmService};
-use crate::memory::{
-    chunking::chunk_text,
-    error::MemoryError,
-    index::Index,
-    messages::{IndexSearch, Search, SearchResult},
-};
 
 /// A short-lived actor that handles a single Search request.
 pub struct SearchOp {
-    index: Address<Index>,
     llm: Address<LlmService>,
+    index: Address<Index>,
     chunk_size: usize,
     chunk_overlap: usize,
 }
 
 impl SearchOp {
     pub fn new(
-        index: Address<Index>,
         llm: Address<LlmService>,
+        index: Address<Index>,
         chunk_size: usize,
         chunk_overlap: usize,
     ) -> Self {
         Self {
-            index,
             llm,
+            index,
             chunk_size,
             chunk_overlap,
         }
@@ -52,7 +48,7 @@ impl Handler<Search> for SearchOp {
         msg: Search,
         _ctx: &mut Self::Context,
     ) -> Result<Vec<SearchResult>, MemoryError> {
-        trace!("Handle command {:?}", msg);
+        debug_trace!("Handle command {:?}", msg);
 
         if msg.query.trim().is_empty() {
             return Ok(Vec::new());
@@ -64,13 +60,7 @@ impl Handler<Search> for SearchOp {
         let embeddings = if texts.is_empty() {
             return Ok(Vec::new());
         } else {
-            self.llm
-                .send(Embed { texts })
-                .await
-                .map_err(|e| MemoryError::Actor(e.to_string()))?
-                .await
-                .map_err(|e| MemoryError::Actor(e.to_string()))??
-                .embeddings
+            self.llm.send(Embed { texts }).await?.await??.embeddings
         };
 
         let results = self
@@ -81,10 +71,8 @@ impl Handler<Search> for SearchOp {
                 agent_id: msg.agent_id,
                 limit: 20,
             })
-            .await
-            .map_err(|e| MemoryError::Actor(e.to_string()))?
-            .await
-            .map_err(|e| MemoryError::Actor(e.to_string()))??;
+            .await?
+            .await??;
 
         Ok(results)
     }

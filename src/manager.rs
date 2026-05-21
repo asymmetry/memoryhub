@@ -1,262 +1,192 @@
-//! Top-level supervisor actor. Owns and supervises [`LlmService`],
-//! [`MemoryManager`], and [`HttpServer`].
-
 use std::future::Future;
 
-use acktor::supervisor::{SupervisionEvent, Supervisor};
-use acktor::{Actor, ActorContext, Address, Context, ErrorReport, Handler, Recipient, Signal};
-use tokio::sync::oneshot;
+use acktor::{
+    Actor, ActorContext, Address, Context, ErrorReport, Handler,
+    supervisor::SupervisionEvent,
+    utils::{debug_trace, terminate_actor},
+};
 use tokio::task::JoinHandle;
-use tracing::{debug, error, info, trace, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::config::Config;
-use crate::error::ManagerError;
+use crate::error::ClawChorusError;
 use crate::http::HttpServer;
-use crate::llm::{LlmService, provider::build_provider};
-use crate::memory::manager::MemoryManager;
+use crate::llm::LlmService;
+use crate::memory::MemoryManager;
 
-pub struct Manager {
-    llm: Address<LlmService>,
-    memory: Address<MemoryManager>,
-    http: Address<HttpServer>,
+pub struct ClawChorus {
+    config: Config,
+    llm: Option<Address<LlmService>>,
+    memory: Option<Address<MemoryManager>>,
+    http: Option<Address<HttpServer>>,
     llm_handle: Option<JoinHandle<()>>,
     memory_handle: Option<JoinHandle<()>>,
     http_handle: Option<JoinHandle<()>>,
-    shutdown_tx: Option<oneshot::Sender<()>>,
-    shutting_down: bool,
 }
 
-impl Manager {
-    /// Build the Manager: spawns LLM, then MemoryManager, then HttpServer.
-    /// On failure any already-spawned children are dropped (their JoinHandles
-    /// are dropped with them; acktor stops them when their mailbox closes).
-    pub fn new(config: Config, shutdown_tx: oneshot::Sender<()>) -> Result<Self, ManagerError> {
-        let provider = build_provider(&config.llm)?;
-        let llm = LlmService::new(config.llm, provider);
-        let (llm_addr, llm_handle) = llm
-            .start("llm-service")
-            .map_err(|e| ManagerError::Actor(format!("LlmService start: {e}")))?;
-        info!("LlmService started");
-
-        let memory = MemoryManager::new(config.memory, llm_addr.clone())?;
-        let (memory_addr, memory_handle) = memory
-            .start("memory-manager")
-            .map_err(|e| ManagerError::Actor(format!("MemoryManager start: {e}")))?;
-        info!("MemoryManager started");
-
-        let http = HttpServer::new(config.server, memory_addr.clone());
-        let (http_addr, http_handle) = http
-            .start("http-server")
-            .map_err(|e| ManagerError::Actor(format!("HttpServer start: {e}")))?;
-        info!("HttpServer started");
-
-        Ok(Self {
-            llm: llm_addr,
-            memory: memory_addr,
-            http: http_addr,
-            llm_handle: Some(llm_handle),
-            memory_handle: Some(memory_handle),
-            http_handle: Some(http_handle),
-            shutdown_tx: Some(shutdown_tx),
-            shutting_down: false,
-        })
-    }
-
-    /// Test seam: build a Manager with a caller-supplied LLM provider,
-    /// bypassing `build_provider`. Lets tests inject `MockProvider`.
-    pub fn new_with_provider(
-        config: Config,
-        provider: std::sync::Arc<dyn crate::llm::provider::Provider>,
-        shutdown_tx: oneshot::Sender<()>,
-    ) -> Result<Self, ManagerError> {
-        let llm = LlmService::new(config.llm, provider);
-        let (llm_addr, llm_handle) = llm
-            .start("llm-service")
-            .map_err(|e| ManagerError::Actor(format!("LlmService start: {e}")))?;
-
-        let memory = MemoryManager::new(config.memory, llm_addr.clone())?;
-        let (memory_addr, memory_handle) = memory
-            .start("memory-manager")
-            .map_err(|e| ManagerError::Actor(format!("MemoryManager start: {e}")))?;
-
-        let http = HttpServer::new(config.server, memory_addr.clone());
-        let (http_addr, http_handle) = http
-            .start("http-server")
-            .map_err(|e| ManagerError::Actor(format!("HttpServer start: {e}")))?;
-
-        Ok(Self {
-            llm: llm_addr,
-            memory: memory_addr,
-            http: http_addr,
-            llm_handle: Some(llm_handle),
-            memory_handle: Some(memory_handle),
-            http_handle: Some(http_handle),
-            shutdown_tx: Some(shutdown_tx),
-            shutting_down: false,
-        })
-    }
-
-    /// Test seam: returns the HttpServer address so tests can simulate child
-    /// death by signal-terminating it directly. Not used by production code.
-    pub fn http_addr(&self) -> &Address<HttpServer> {
-        &self.http
-    }
-}
-
-impl Manager {
-    /// Begins teardown: fire the shutdown oneshot so `main` exits, then
-    /// signal-terminate the surviving children. Idempotent — second call
-    /// observes `shutting_down` and returns.
-    fn initiate_shutdown(&mut self, child: &str) {
-        if self.shutting_down {
-            debug!("initiate_shutdown ignored (already shutting down), trigger={child}");
-            return;
-        }
-        self.shutting_down = true;
-        error!("Manager initiating shutdown after {child} death");
-
-        if let Some(tx) = self.shutdown_tx.take() {
-            // Receiver may already be dropped if main exited via ctrl-c; ignore.
-            let _ = tx.send(());
+impl ClawChorus {
+    /// Constructs the a new `ClawChorus` instance.
+    pub fn new(config: Config) -> Self {
+        Self {
+            config,
+            llm: None,
+            memory: None,
+            http: None,
+            llm_handle: None,
+            memory_handle: None,
+            http_handle: None,
         }
     }
 }
 
-impl Actor for Manager {
+impl Actor for ClawChorus {
     type Context = Context<Self>;
-    type Error = ManagerError;
+    type Error = ClawChorusError;
 
-    async fn post_start(&mut self, ctx: &mut Self::Context) -> Result<(), ManagerError> {
-        trace!("Manager post_start: subscribing supervisor events");
+    fn pre_start(&mut self, ctx: &mut Self::Context) -> Result<(), ClawChorusError> {
+        let Config {
+            server,
+            memory,
+            llm,
+            ..
+        } = self.config.clone();
 
-        let llm_recipient: Recipient<SupervisionEvent<LlmService>> = ctx.address().into();
-        self.llm
-            .do_send(Supervisor::Set(llm_recipient))
-            .await
-            .map_err(|e| ManagerError::Actor(format!("Set LLM supervisor: {e}")))?;
+        let (llm_addr, llm_handle) = LlmService::create("llm-service", |child_ctx| {
+            child_ctx.set_supervisor(Some(ctx.address().into()));
+            Ok(LlmService::new(llm))
+        })?;
 
-        let memory_recipient: Recipient<SupervisionEvent<MemoryManager>> = ctx.address().into();
-        self.memory
-            .do_send(Supervisor::Set(memory_recipient))
-            .await
-            .map_err(|e| ManagerError::Actor(format!("Set MemoryManager supervisor: {e}")))?;
+        let (memory_addr, memory_handle) = MemoryManager::create("memory-manager", |child_ctx| {
+            child_ctx.set_supervisor(Some(ctx.address().into()));
+            Ok(MemoryManager::new(memory, llm_addr.clone()))
+        })?;
 
-        let http_recipient: Recipient<SupervisionEvent<HttpServer>> = ctx.address().into();
-        self.http
-            .do_send(Supervisor::Set(http_recipient))
-            .await
-            .map_err(|e| ManagerError::Actor(format!("Set HttpServer supervisor: {e}")))?;
+        let (http_addr, http_handle) = HttpServer::create("http-server", |child_ctx| {
+            child_ctx.set_supervisor(Some(ctx.address().into()));
+            Ok(HttpServer::new(server, memory_addr.clone()))
+        })?;
 
-        info!("Manager is supervising LlmService, MemoryManager, HttpServer");
+        self.llm = Some(llm_addr);
+        self.memory = Some(memory_addr);
+        self.http = Some(http_addr);
+        self.llm_handle = Some(llm_handle);
+        self.memory_handle = Some(memory_handle);
+        self.http_handle = Some(http_handle);
+
         Ok(())
     }
 
-    async fn post_stop(&mut self, _ctx: &mut Self::Context) -> Result<(), ManagerError> {
+    async fn post_start(&mut self, _ctx: &mut Self::Context) -> Result<(), ClawChorusError> {
+        info!("ClawChorus is ready");
+
+        Ok(())
+    }
+
+    async fn post_stop(&mut self, _ctx: &mut Self::Context) -> Result<(), ClawChorusError> {
         // Drain in reverse startup order: HTTP first (stop accepting work),
         // then MemoryManager (flush in-flight ops), then LLM.
-        if let Some(handle) = self.http_handle.take() {
-            if let Err(e) = self.http.do_send(Signal::Terminate).await {
-                warn!("Could not signal HttpServer: {}", e.report());
-                handle.abort();
-            }
-            if let Err(e) = handle.await {
-                warn!("HttpServer join error: {e}");
-            }
+        if let (Some(addr), Some(handle)) = (self.http.take(), self.http_handle.take()) {
+            terminate_actor(addr, handle).await;
         }
-        if let Some(handle) = self.memory_handle.take() {
-            if let Err(e) = self.memory.do_send(Signal::Terminate).await {
-                warn!("Could not signal MemoryManager: {}", e.report());
-                handle.abort();
-            }
-            if let Err(e) = handle.await {
-                warn!("MemoryManager join error: {e}");
-            }
+
+        if let (Some(addr), Some(handle)) = (self.memory.take(), self.memory_handle.take()) {
+            terminate_actor(addr, handle).await;
         }
-        if let Some(handle) = self.llm_handle.take() {
-            if let Err(e) = self.llm.do_send(Signal::Terminate).await {
-                warn!("Could not signal LlmService: {}", e.report());
-                handle.abort();
-            }
-            if let Err(e) = handle.await {
-                warn!("LlmService join error: {e}");
-            }
+
+        if let (Some(addr), Some(handle)) = (self.llm.take(), self.llm_handle.take()) {
+            terminate_actor(addr, handle).await;
         }
-        info!("Manager is stopped");
+
         Ok(())
     }
 }
 
-impl Handler<SupervisionEvent<LlmService>> for Manager {
-    type Result = ();
-
-    fn handle(
-        &mut self,
-        msg: SupervisionEvent<LlmService>,
-        _ctx: &mut Self::Context,
-    ) -> impl Future<Output = ()> + Send {
-        trace!("Manager: SupervisionEvent<LlmService>");
-        match msg {
-            SupervisionEvent::Warn(_, e) => warn!("LlmService warning: {e}"),
-            SupervisionEvent::State(_, s) => debug!("LlmService state: {s:?}"),
-            SupervisionEvent::Terminated(_, e) => {
-                error!("LlmService terminated: {e:?}");
-                self.initiate_shutdown("LlmService");
-            }
-            SupervisionEvent::Panicked(_, info) => {
-                error!("LlmService panicked: {info}");
-                self.initiate_shutdown("LlmService");
-            }
-        }
-        std::future::ready(())
-    }
-}
-
-impl Handler<SupervisionEvent<MemoryManager>> for Manager {
+impl Handler<SupervisionEvent<MemoryManager>> for ClawChorus {
     type Result = ();
 
     fn handle(
         &mut self,
         msg: SupervisionEvent<MemoryManager>,
-        _ctx: &mut Self::Context,
+        ctx: &mut Self::Context,
     ) -> impl Future<Output = ()> + Send {
-        trace!("Manager: SupervisionEvent<MemoryManager>");
+        debug_trace!("Handling supervision event {:?}", msg);
+
         match msg {
-            SupervisionEvent::Warn(_, e) => warn!("MemoryManager warning: {e}"),
-            SupervisionEvent::State(_, s) => debug!("MemoryManager state: {s:?}"),
+            SupervisionEvent::Warn(_, e) => warn!("MemoryManager warning: {}", e.report()),
             SupervisionEvent::Terminated(_, e) => {
-                error!("MemoryManager terminated: {e:?}");
-                self.initiate_shutdown("MemoryManager");
+                match e {
+                    Some(e) => error!("MemoryManager terminated with error: {}", e.report()),
+                    None => debug!("MemoryManager terminated"),
+                }
+                ctx.stop();
             }
             SupervisionEvent::Panicked(_, info) => {
                 error!("MemoryManager panicked: {info}");
-                self.initiate_shutdown("MemoryManager");
+                ctx.stop();
             }
+            _ => {}
         }
+
         std::future::ready(())
     }
 }
 
-impl Handler<SupervisionEvent<HttpServer>> for Manager {
+impl Handler<SupervisionEvent<LlmService>> for ClawChorus {
+    type Result = ();
+
+    fn handle(
+        &mut self,
+        msg: SupervisionEvent<LlmService>,
+        ctx: &mut Self::Context,
+    ) -> impl Future<Output = ()> + Send {
+        debug_trace!("Handling supervision event {:?}", msg);
+
+        match msg {
+            SupervisionEvent::Warn(_, e) => warn!("LlmService warning: {}", e.report()),
+            SupervisionEvent::Terminated(_, e) => {
+                match e {
+                    Some(e) => error!("LlmService terminated with error: {}", e.report()),
+                    None => debug!("LlmService terminated"),
+                }
+                ctx.stop();
+            }
+            SupervisionEvent::Panicked(_, info) => {
+                error!("LlmService panicked: {info}");
+                ctx.stop();
+            }
+            _ => {}
+        }
+
+        std::future::ready(())
+    }
+}
+
+impl Handler<SupervisionEvent<HttpServer>> for ClawChorus {
     type Result = ();
 
     fn handle(
         &mut self,
         msg: SupervisionEvent<HttpServer>,
-        _ctx: &mut Self::Context,
+        ctx: &mut Self::Context,
     ) -> impl Future<Output = ()> + Send {
-        trace!("Manager: SupervisionEvent<HttpServer>");
+        debug_trace!("Handling supervision event {:?}", msg);
+
         match msg {
-            SupervisionEvent::Warn(_, e) => warn!("HttpServer warning: {e}"),
-            SupervisionEvent::State(_, s) => debug!("HttpServer state: {s:?}"),
+            SupervisionEvent::Warn(_, e) => warn!("HttpServer warning: {}", e.report()),
             SupervisionEvent::Terminated(_, e) => {
-                error!("HttpServer terminated: {e:?}");
-                self.initiate_shutdown("HttpServer");
+                match e {
+                    Some(e) => error!("HttpServer terminated with error: {}", e.report()),
+                    None => debug!("HttpServer terminated"),
+                }
+                ctx.stop();
             }
             SupervisionEvent::Panicked(_, info) => {
                 error!("HttpServer panicked: {info}");
-                self.initiate_shutdown("HttpServer");
+                ctx.stop();
             }
+            _ => {}
         }
+
         std::future::ready(())
     }
 }

@@ -6,99 +6,100 @@
 
 use std::path::PathBuf;
 
-use acktor::message::FutureMessageResult;
-use acktor::{Actor, Address, Context, ErrorReport, Handler, Message, Signal};
-use tokio::task::JoinHandle;
-use tracing::{info, trace, warn};
-
-use crate::llm::LlmService;
-use crate::memory::{
-    config::MemoryConfig,
-    error::MemoryError,
-    file_op::FileOp,
-    index::Index,
-    messages::{FileOpDelete, FileOpRead, FileOpWrite, Search},
-    search_op::SearchOp,
-    storage::Storage,
-    synthesizer::Synthesizer,
+use acktor::{
+    Actor, Address, Context, Handler, JoinHandle, Message,
+    message::FutureMessageResult,
+    utils::{debug_trace, terminate_actor},
 };
+use tracing::info;
+
+use super::config::MemoryConfig;
+use super::error::MemoryError;
+use super::file_op::FileOp;
+use super::index::Index;
+use super::message::{FileOpDelete, FileOpRead, FileOpWrite, Search};
+use super::search_op::SearchOp;
+use super::storage::Storage;
+use super::synthesizer::Synthesizer;
+use crate::llm::LlmService;
 
 /// Shorthand for results in this module.
 type Result<T> = std::result::Result<T, MemoryError>;
 
+/// Supervisor actor for the memory sub-system.
 pub struct MemoryManager {
     config: MemoryConfig,
-    storage: Address<Storage>,
-    index: Address<Index>,
     llm: Address<LlmService>,
-    synthesizer: Address<Synthesizer>,
+    storage: Option<Address<Storage>>,
+    index: Option<Address<Index>>,
+    synthesizer: Option<Address<Synthesizer>>,
     storage_handle: Option<JoinHandle<()>>,
     index_handle: Option<JoinHandle<()>>,
     synthesizer_handle: Option<JoinHandle<()>>,
 }
 
 impl MemoryManager {
-    pub fn new(config: MemoryConfig, llm: Address<LlmService>) -> Result<Self> {
-        let memory_dir = PathBuf::from(&config.memory_dir);
-        let storage = Storage::new(memory_dir);
-        let (storage_addr, storage_handle) = storage.start("storage")?;
-
-        let index = if config.db_path == ":memory:" {
-            Index::open_in_memory()?
-        } else {
-            Index::open(&PathBuf::from(&config.db_path))?
-        };
-        let (index_addr, index_handle) = index.start("index")?;
-
-        let synthesizer = Synthesizer::new(
-            storage_addr.clone(),
-            index_addr.clone(),
-            llm.clone(),
-            config.synthesizer_cooldown_secs,
-            config.chunk_size,
-            config.chunk_overlap,
-        );
-        let (synthesizer_addr, synthesizer_handle) = synthesizer
-            .start("synthesizer")
-            .map_err(|_| MemoryError::Actor("failed to spawn Synthesizer".to_string()))?;
-
-        Ok(Self {
+    /// Construct a `MemoryManager`. Child actors are spawned in
+    /// [`Actor::post_start`], not here.
+    pub fn new(config: MemoryConfig, llm: Address<LlmService>) -> Self {
+        Self {
             config,
-            storage: storage_addr,
-            index: index_addr,
             llm,
-            synthesizer: synthesizer_addr,
-            storage_handle: Some(storage_handle),
-            index_handle: Some(index_handle),
-            synthesizer_handle: Some(synthesizer_handle),
-        })
+            storage: None,
+            index: None,
+            synthesizer: None,
+            storage_handle: None,
+            index_handle: None,
+            synthesizer_handle: None,
+        }
     }
 
-    /// Build a [`FutureMessageResult`] that spawns a fresh [`FileOp`] actor and
-    /// drives the request off-mailbox, so the `MemoryManager` is free to
-    /// process the next message while the pipeline runs.
-    fn dispatch_file_op<M, T>(&self, msg: M) -> FutureMessageResult<M>
+    fn storage(&self) -> &Address<Storage> {
+        self.storage
+            .as_ref()
+            .expect("MemoryManager: storage not started")
+    }
+
+    fn index(&self) -> &Address<Index> {
+        self.index
+            .as_ref()
+            .expect("MemoryManager: index not started")
+    }
+
+    fn synthesizer(&self) -> &Address<Synthesizer> {
+        self.synthesizer
+            .as_ref()
+            .expect("MemoryManager: synthesizer not started")
+    }
+
+    async fn dispatch_file_op<M, T>(&self, msg: M) -> FutureMessageResult<M>
     where
-        M: Message<Result = Result<T>> + Send + 'static,
+        M: Message<Result = Result<T>> + Send + Sync + 'static,
         T: Send + 'static,
         FileOp: Handler<M>,
     {
-        let storage = self.storage.clone();
-        let index = self.index.clone();
-        let llm = self.llm.clone();
-        let synthesizer = self.synthesizer.clone();
-        let chunk_size = self.config.chunk_size;
-        let chunk_overlap = self.config.chunk_overlap;
+        let result = match FileOp::new(
+            self.llm.clone(),
+            self.storage().clone(),
+            self.index().clone(),
+            self.synthesizer().clone(),
+            self.config.chunk_size,
+            self.config.chunk_overlap,
+        )
+        .start("file-op")
+        {
+            Ok((addr, _handle)) => match addr.send(msg).await {
+                Ok(rx) => Ok::<_, MemoryError>((addr, rx)),
+                Err(e) => Err(e.into()),
+            },
+            Err(e) => Err(e),
+        };
+
         FutureMessageResult::new(async move {
-            let (addr, _handle) =
-                FileOp::new(storage, index, llm, synthesizer, chunk_size, chunk_overlap)
-                    .start("file-op")
-                    .map_err(|_| MemoryError::Actor("failed to spawn FileOp".to_string()))?;
-            addr.send(msg)
-                .await
-                .map_err(|e| MemoryError::Actor(e.to_string()))?
-                .await
-                .map_err(|e| MemoryError::Actor(e.to_string()))?
+            // Keep `_addr` alive across the response wait so the per-request
+            // actor isn't terminated before it can reply.
+            let (_addr, rx) = result?;
+            rx.await?
         })
     }
 }
@@ -108,43 +109,47 @@ impl Actor for MemoryManager {
     type Error = MemoryError;
 
     async fn post_start(&mut self, _ctx: &mut Self::Context) -> Result<()> {
+        let memory_dir = PathBuf::from(&self.config.memory_dir);
+        let (storage_addr, storage_handle) = Storage::new(memory_dir.clone()).start("storage")?;
+
+        let index = if self.config.db_path == ":memory:" {
+            Index::open_in_memory()?
+        } else {
+            Index::open(&PathBuf::from(&self.config.db_path))?
+        };
+        let (index_addr, index_handle) = index.start("index")?;
+
+        let synthesizer = Synthesizer::new(
+            self.llm.clone(),
+            storage_addr.clone(),
+            index_addr.clone(),
+            self.config.clone(),
+        );
+        let (synthesizer_addr, synthesizer_handle) = synthesizer.start("synthesizer")?;
+
+        self.storage = Some(storage_addr);
+        self.index = Some(index_addr);
+        self.synthesizer = Some(synthesizer_addr);
+        self.storage_handle = Some(storage_handle);
+        self.index_handle = Some(index_handle);
+        self.synthesizer_handle = Some(synthesizer_handle);
+
         info!("MemoryManager is ready");
 
         Ok(())
     }
 
     async fn post_stop(&mut self, _ctx: &mut Self::Context) -> Result<()> {
-        if let Some(join_handle) = self.synthesizer_handle.take() {
-            if let Err(e) = self.synthesizer.do_send(Signal::Terminate).await {
-                warn!("Could not stop synthesizer actor: {}", e.report());
-                join_handle.abort();
-            }
-
-            if let Err(e) = join_handle.await {
-                warn!("Synthesizer actor join error: {}", e);
-            }
+        if let (Some(addr), Some(handle)) =
+            (self.synthesizer.take(), self.synthesizer_handle.take())
+        {
+            terminate_actor(addr, handle).await;
         }
-
-        if let Some(join_handle) = self.storage_handle.take() {
-            if let Err(e) = self.storage.do_send(Signal::Terminate).await {
-                warn!("Could not stop storage actor: {}", e.report());
-                join_handle.abort();
-            }
-
-            if let Err(e) = join_handle.await {
-                warn!("Storage actor join error: {}", e);
-            }
+        if let (Some(addr), Some(handle)) = (self.storage.take(), self.storage_handle.take()) {
+            terminate_actor(addr, handle).await;
         }
-
-        if let Some(join_handle) = self.index_handle.take() {
-            if let Err(e) = self.index.do_send(Signal::Terminate).await {
-                warn!("Could not stop index actor: {}", e.report());
-                join_handle.abort();
-            }
-
-            if let Err(e) = join_handle.await {
-                warn!("Index actor join error: {}", e);
-            }
+        if let (Some(addr), Some(handle)) = (self.index.take(), self.index_handle.take()) {
+            terminate_actor(addr, handle).await;
         }
 
         info!("MemoryManager is stopped");
@@ -161,8 +166,9 @@ impl Handler<FileOpWrite> for MemoryManager {
         msg: FileOpWrite,
         _ctx: &mut Self::Context,
     ) -> FutureMessageResult<FileOpWrite> {
-        trace!("Handle command {:?}", msg);
-        self.dispatch_file_op(msg)
+        debug_trace!("Handle command {:?}", msg);
+
+        self.dispatch_file_op(msg).await
     }
 }
 
@@ -174,8 +180,9 @@ impl Handler<FileOpRead> for MemoryManager {
         msg: FileOpRead,
         _ctx: &mut Self::Context,
     ) -> FutureMessageResult<FileOpRead> {
-        trace!("Handle command {:?}", msg);
-        self.dispatch_file_op(msg)
+        debug_trace!("Handle command {:?}", msg);
+
+        self.dispatch_file_op(msg).await
     }
 }
 
@@ -187,8 +194,9 @@ impl Handler<FileOpDelete> for MemoryManager {
         msg: FileOpDelete,
         _ctx: &mut Self::Context,
     ) -> FutureMessageResult<FileOpDelete> {
-        trace!("Handle command {:?}", msg);
-        self.dispatch_file_op(msg)
+        debug_trace!("Handle command {:?}", msg);
+
+        self.dispatch_file_op(msg).await
     }
 }
 
@@ -200,20 +208,26 @@ impl Handler<Search> for MemoryManager {
         msg: Search,
         _ctx: &mut Self::Context,
     ) -> FutureMessageResult<Search> {
-        trace!("Handle command {:?}", msg);
-        let index = self.index.clone();
-        let llm = self.llm.clone();
-        let chunk_size = self.config.chunk_size;
-        let chunk_overlap = self.config.chunk_overlap;
+        debug_trace!("Handle command {:?}", msg);
+
+        let prepared = match SearchOp::new(
+            self.llm.clone(),
+            self.index().clone(),
+            self.config.chunk_size,
+            self.config.chunk_overlap,
+        )
+        .start("search-op")
+        {
+            Ok((addr, _handle)) => match addr.send(msg).await {
+                Ok(rx) => Ok::<_, MemoryError>((addr, rx)),
+                Err(e) => Err(e.into()),
+            },
+            Err(e) => Err(e),
+        };
+
         FutureMessageResult::new(async move {
-            let (addr, _handle) = SearchOp::new(index, llm, chunk_size, chunk_overlap)
-                .start("search-op")
-                .map_err(|_| MemoryError::Actor("failed to spawn SearchOp".to_string()))?;
-            addr.send(msg)
-                .await
-                .map_err(|e| MemoryError::Actor(e.to_string()))?
-                .await
-                .map_err(|e| MemoryError::Actor(e.to_string()))?
+            let (_addr, rx) = prepared?;
+            rx.await?
         })
     }
 }
@@ -223,15 +237,15 @@ mod tests {
     use uuid::Uuid;
 
     use super::*;
-    use crate::memory::{
-        MemoryType,
-        messages::{FileOpDelete, FileOpRead, FileOpWrite, Search},
-    };
+    use crate::memory::message::{FileOpDelete, FileOpRead, FileOpWrite, Search};
 
     fn test_llm() -> Address<LlmService> {
-        let provider = std::sync::Arc::new(crate::llm::provider::mock::MockProvider::new());
-        let llm = LlmService::new(Default::default(), provider);
-        let (addr, _handle) = llm.start("llm-test").unwrap();
+        let cfg = crate::llm::LlmConfig {
+            provider: "mock".into(),
+            embedding_provider: "mock".into(),
+            ..Default::default()
+        };
+        let (addr, _handle) = LlmService::new(cfg).start("llm-test").unwrap();
         addr
     }
 
@@ -247,7 +261,7 @@ mod tests {
     async fn full_write_read_delete_cycle() {
         let dir = tempfile::tempdir().unwrap();
 
-        let mm = MemoryManager::new(test_config(dir.path()), test_llm()).unwrap();
+        let mm = MemoryManager::new(test_config(dir.path()), test_llm());
         let (addr, _handle) = mm.start("memory-manager").unwrap();
 
         let agent_id = Uuid::new_v4();
@@ -256,7 +270,6 @@ mod tests {
         addr.send(FileOpWrite {
             username: "alice".to_string(),
             agent_id,
-            memory_type: MemoryType::DailyNote,
             filename: "test.md".to_string(),
             content: "Hello from test".to_string(),
         })
@@ -271,7 +284,6 @@ mod tests {
             .send(FileOpRead {
                 username: "alice".to_string(),
                 agent_id,
-                memory_type: MemoryType::DailyNote,
                 filename: "test.md".to_string(),
             })
             .await
@@ -285,7 +297,6 @@ mod tests {
         addr.send(FileOpDelete {
             username: "alice".to_string(),
             agent_id,
-            memory_type: MemoryType::DailyNote,
             filename: "test.md".to_string(),
         })
         .await
@@ -299,7 +310,6 @@ mod tests {
             .send(FileOpRead {
                 username: "alice".to_string(),
                 agent_id,
-                memory_type: MemoryType::DailyNote,
                 filename: "test.md".to_string(),
             })
             .await
@@ -314,7 +324,7 @@ mod tests {
     async fn search_after_write() {
         let dir = tempfile::tempdir().unwrap();
 
-        let mm = MemoryManager::new(test_config(dir.path()), test_llm()).unwrap();
+        let mm = MemoryManager::new(test_config(dir.path()), test_llm());
         let (addr, _handle) = mm.start("memory-manager").unwrap();
 
         let agent_id = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440000").unwrap();
@@ -322,7 +332,6 @@ mod tests {
         addr.send(FileOpWrite {
             username: "alice".to_string(),
             agent_id,
-            memory_type: MemoryType::DailyNote,
             filename: "notes.md".to_string(),
             content: "Rust programming language is great".to_string(),
         })
@@ -354,14 +363,13 @@ mod tests {
         let mut cfg = test_config(dir.path());
         cfg.synthesizer_cooldown_secs = 0;
 
-        let mm = MemoryManager::new(cfg, test_llm()).unwrap();
+        let mm = MemoryManager::new(cfg, test_llm());
         let (addr, _handle) = mm.start("memory-manager").unwrap();
 
         let agent_id = Uuid::new_v4();
         addr.send(FileOpWrite {
             username: "alice".to_string(),
             agent_id,
-            memory_type: MemoryType::DailyNote,
             filename: "first.md".to_string(),
             content: "Some content for synthesis".to_string(),
         })
@@ -373,18 +381,20 @@ mod tests {
 
         tokio::time::sleep(std::time::Duration::from_millis(300)).await;
 
-        let synth_dir = dir
-            .path()
-            .join("alice")
-            .join("_synthesized")
-            .join("long_term");
-        let entries: Vec<_> = std::fs::read_dir(&synth_dir)
-            .map(|rd| rd.filter_map(|e| e.ok()).collect())
-            .unwrap_or_default();
+        let folder = dir.path().join("alice").join("_synthesized");
         assert!(
-            !entries.is_empty(),
-            "expected synthesis file under {:?}",
-            synth_dir
+            folder.is_dir(),
+            "expected _synthesized folder at {folder:?}"
         );
+        let any_md = std::fs::read_dir(&folder)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .any(|e| {
+                e.path()
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|s| s.ends_with(".md"))
+            });
+        assert!(any_md, "expected a dated synthesis file in {folder:?}");
     }
 }

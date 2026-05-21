@@ -1,34 +1,37 @@
 //! HTTP service: Axum-based JSON API over the Memory Manager actor.
 
-pub mod dto;
-pub mod error;
-pub mod handlers;
-pub mod router;
-
-use std::io;
 use std::net::SocketAddr;
 
-use acktor::{Actor, Address, Context};
-use thiserror::Error;
-use tokio::net::TcpListener;
-use tokio::task::JoinHandle;
-use tracing::{info, trace};
+use acktor::{Actor, Address, Context, ErrorReport};
+use tokio::{net::TcpListener, task::JoinHandle};
+use tracing::{Instrument, error, info};
 
 use crate::config::ServerConfig;
-use crate::http::router::build_router;
-use crate::memory::manager::MemoryManager;
+use crate::memory::MemoryManager;
 
-#[derive(Debug, Error)]
-pub enum HttpServerError {
-    #[error("bind error on {addr}: {source}")]
-    Bind { addr: String, source: io::Error },
-    #[error("invalid bind address {addr}: {source}")]
-    InvalidAddr {
-        addr: String,
-        source: std::net::AddrParseError,
-    },
+mod router;
+pub use router::build_router;
+
+pub mod error;
+pub use error::HttpServerError;
+
+/// State shared across all HTTP handlers.
+///
+/// Holds the dependencies needed to service requests.
+#[derive(Clone)]
+pub struct HttpServerState {
+    /// Address of the Memory Manager actor that handlers dispatch requests to.
+    pub memory_manager: Address<MemoryManager>,
 }
 
+impl HttpServerState {
+    /// Constructs the shared state of the `HttpServer`.
+    pub fn new(memory_manager: Address<MemoryManager>) -> Self {
+        Self { memory_manager }
+    }
+}
+
+/// Actor that owns the Axum HTTP server.
 pub struct HttpServer {
     config: ServerConfig,
     memory_manager: Address<MemoryManager>,
@@ -36,6 +39,7 @@ pub struct HttpServer {
 }
 
 impl HttpServer {
+    /// Constructs a new `HttpServer`.
     pub fn new(config: ServerConfig, memory_manager: Address<MemoryManager>) -> Self {
         Self {
             config,
@@ -50,7 +54,6 @@ impl Actor for HttpServer {
     type Error = HttpServerError;
 
     async fn post_start(&mut self, _ctx: &mut Self::Context) -> Result<(), HttpServerError> {
-        trace!("HttpServer post_start");
         let addr_str = format!("{}:{}", self.config.host, self.config.port);
         let addr: SocketAddr = addr_str
             .parse()
@@ -64,14 +67,20 @@ impl Actor for HttpServer {
                 addr: addr_str.clone(),
                 source,
             })?;
-        let app = build_router(self.memory_manager.clone());
-        info!(%addr, "HttpServer listening");
-        let handle = tokio::spawn(async move {
-            if let Err(e) = axum::serve(listener, app).await {
-                tracing::error!("axum serve error: {e}");
+        let app = build_router(HttpServerState::new(self.memory_manager.clone()));
+
+        let handle = tokio::spawn(
+            async move {
+                if let Err(e) = axum::serve(listener, app).await {
+                    error!("Could not start HTTP server: {}", e.report());
+                }
             }
-        });
+            .in_current_span(),
+        );
         self.serve_handle = Some(handle);
+
+        info!("HttpServer is listening on {}", addr);
+
         Ok(())
     }
 
@@ -79,47 +88,9 @@ impl Actor for HttpServer {
         if let Some(handle) = self.serve_handle.take() {
             handle.abort();
         }
+
         info!("HttpServer is stopped");
+
         Ok(())
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::llm::LlmService;
-    use crate::llm::provider::mock::MockProvider;
-    use crate::memory::config::MemoryConfig;
-    use std::sync::Arc;
-
-    #[tokio::test]
-    async fn http_server_starts_and_stops() {
-        let provider = Arc::new(MockProvider::new());
-        let llm = LlmService::new(Default::default(), provider);
-        let (llm_addr, _llm_handle) = llm.start("llm-test").unwrap();
-
-        let dir = tempfile::tempdir().unwrap();
-        let mm_cfg = MemoryConfig {
-            memory_dir: dir.path().to_string_lossy().to_string(),
-            db_path: ":memory:".to_string(),
-            ..MemoryConfig::default()
-        };
-        let mm = MemoryManager::new(mm_cfg, llm_addr).unwrap();
-        let (mm_addr, _mm_handle) = mm.start("memory-manager").unwrap();
-
-        // Pick an ephemeral port by binding 0.
-        let cfg = ServerConfig {
-            host: "127.0.0.1".to_string(),
-            port: 0,
-        };
-        let server = HttpServer::new(cfg, mm_addr);
-        let (server_addr, server_handle) = server.start("http-server").unwrap();
-
-        // Stop the actor cleanly.
-        server_addr
-            .do_send(acktor::Signal::Terminate)
-            .await
-            .unwrap();
-        let _ = server_handle.await;
     }
 }

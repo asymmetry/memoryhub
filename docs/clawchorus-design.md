@@ -26,7 +26,7 @@ Single Rust binary built on the `acktor` actor framework (Tokio-based). The Mana
 ### Sub-systems
 
 - **Memory Manager** — Manages memory storage, metadata, and search. Spawns a child actor for each new memory file received or each query request. Contains long-lived child actors: Storage (filesystem I/O), Index (SQLite), and Synthesizer (cross-user synthesis). Holds a reference to the LLM Service actor for embedding and LLM operations.
-- **LLM Service** — Manages conversation sessions as concurrently running child actors. Handles API communication only — no context or prompt engineering. Each provider (DeepSeek, OpenAI, Claude, etc.) is a separate actor implementation sharing the same message protocol. DeepSeek is the first implementation and the default.
+- **LLM Service** — Two separated capabilities, each a child actor: embedding (`Embedder`) and document synthesis (one long-lived `SynthesisTask` per target, owning prompt engineering and context). Provider HTTP details sit behind a `Provider` trait; DeepSeek is the first implementation and the default.
 - **HTTP Server** — Axum-based endpoints. Receives external requests from OpenClaw agents, forwards all requests directly to the Memory Manager actor.
 - **Manager** — Supervisor for the three child actors. Spawns, monitors, and restarts child actors as needed. Does not run business logic itself.
 
@@ -57,13 +57,12 @@ Component-level design (child actor structure, SQLite schema, filesystem layout,
 
 ## LLM Sub-system
 
-- Actor-based: each provider (DeepSeek, OpenAI, Claude, etc.) is a separate actor implementation sharing the same message protocol
-- DeepSeek is the first implementation and the default provider
-- Handles API communication only — no context or prompt engineering (callers own prompt construction)
-- Two core capabilities: generate embeddings (handled inline on `LlmService` via a non-blocking future), manage conversation sessions
-- Conversations: caller sends StartSession → receives a Session child actor address → sends messages directly to Session → sends StopSession when done. Sessions have an idle timeout for safety.
+- `LlmService` actor with one provider behind a `Provider` trait (DeepSeek, OpenAI, Claude, etc.); DeepSeek is the first implementation and the default
+- Two clearly separated capabilities, each its own child actor: **generate embeddings** (`Embedder`, handled via a non-blocking future) and **synthesize documents** (one long-lived `SynthesisTask` actor per synthesis target)
+- Synthesis owns its prompt engineering and conversation context; prompts are Markdown templates loaded from disk and hot-reloaded
+- Each `SynthesisTask` preserves context across cool-down cycles so only changed content is sent each cycle; it idle-terminates and reseeds from the prior summary
 
-Component-level design (message protocol, session management, retry/error handling) will be specified separately.
+Component-level design is specified in `llm-service-design.md`.
 
 ## HTTP Sub-system
 

@@ -1,21 +1,22 @@
-//! Index Actor — SQLite + FTS5 + sqlite-vec backed search index.
+//! Index and search text chunks.
 //!
-//! Wraps a `rusqlite::Connection` behind `Arc<Mutex<_>>` and uses
-//! `spawn_blocking` for all database operations, since `Connection` is `!Send`
-//! but acktor requires `Actor: Send + 'static`.
+//! The Index actor manages a SQLite database with two main tables: `files` and `chunks`. The
+//! `files` table tracks metadata about each file (path, source, size, updated_at). The `chunks`
+//! table stores the text chunks with their path, line numbers, and embedding model. A virtual
+//! FTS5 table `chunks_fts` enables full-text search on chunk text. A virtual table `chunks_vec`
+//! (sqlite-vec) stores the chunk embeddings for efficient vector search. The Index actor handles
+//! insert, delete, and search operations, running blocking DB operations in `spawn_blocking` to
+//! avoid blocking the async runtime.
 
-use std::{
-    path::Path,
-    sync::{Arc, Mutex},
-};
+use std::path::Path;
+use std::sync::{Arc, Mutex};
 
 use acktor::{Actor, Context, Handler};
+use chrono::Utc;
 use rusqlite::{Connection, params};
 
-use crate::memory::{
-    error::IndexError,
-    messages::{EnsureVecReady, IndexDelete, IndexInsert, IndexSearch, SearchResult},
-};
+use super::error::IndexError;
+use super::message::{EnsureVecReady, IndexDelete, IndexInsert, IndexSearch, SearchResult};
 
 /// The Index actor. Owns a shared SQLite connection.
 pub struct Index {
@@ -23,8 +24,8 @@ pub struct Index {
 }
 
 impl Index {
-    /// Open an in-memory index. The vector table is created lazily on first
-    /// insert via [`EnsureVecReady`].
+    /// Opens an in-memory index. The vector table is created lazily on first insert via
+    /// [`EnsureVecReady`].
     pub fn open_in_memory() -> Result<Self, IndexError> {
         load_sqlite_vec();
         let conn = Connection::open_in_memory()?;
@@ -32,11 +33,13 @@ impl Index {
             conn: Arc::new(Mutex::new(conn)),
         };
         index.init_schema()?;
+
         Ok(index)
     }
 
-    /// Open a persistent index at the given path. If a previous embedding
-    /// dimension is recorded in `meta`, the vec table is rebuilt eagerly.
+    /// Opens a persistent index at the given path.
+    ///
+    /// If a previous embedding dimension is recorded in `meta`, the vec table is rebuilt eagerly.
     pub fn open(path: &Path) -> Result<Self, IndexError> {
         load_sqlite_vec();
         let conn = Connection::open(path)?;
@@ -45,6 +48,7 @@ impl Index {
         };
         index.init_schema()?;
         index.restore_vec_table()?;
+
         Ok(index)
     }
 
@@ -108,8 +112,7 @@ impl Index {
         Ok(())
     }
 
-    /// On reopen of a persistent index, rebuild `chunks_vec` if a dimension is
-    /// recorded in `meta`.
+    /// On reopen of a persistent index, rebuild `chunks_vec` if a dimension is recorded in `meta`.
     fn restore_vec_table(&self) -> Result<(), IndexError> {
         let conn = self.conn.lock().unwrap();
         let stored: Option<String> = conn
@@ -124,6 +127,7 @@ impl Index {
         {
             create_vec_table(&conn, dim)?;
         }
+
         Ok(())
     }
 }
@@ -136,6 +140,7 @@ fn create_vec_table(conn: &Connection, dim: usize) -> Result<(), IndexError> {
         )"
     );
     conn.execute_batch(&ddl)?;
+
     Ok(())
 }
 
@@ -166,15 +171,25 @@ fn do_ensure_vec_ready(conn: &Connection, dim: usize) -> Result<(), IndexError> 
         "INSERT OR REPLACE INTO meta (key, value) VALUES ('embedding_dim', ?1)",
         params![dim.to_string()],
     )?;
+
     Ok(())
 }
 
 /// Register the sqlite-vec extension globally via `sqlite3_auto_extension`.
-/// Safe to call multiple times — SQLite deduplicates auto-extensions.
+///
+/// Safe to call multiple times since SQLite deduplicates auto-extensions.
+#[inline]
 fn load_sqlite_vec() {
     unsafe {
-        rusqlite::ffi::sqlite3_auto_extension(Some(std::mem::transmute(
-            sqlite_vec::sqlite3_vec_init as *const (),
+        rusqlite::ffi::sqlite3_auto_extension(Some(std::mem::transmute::<
+            *const (),
+            unsafe extern "C" fn(
+                *mut rusqlite::ffi::sqlite3,
+                *mut *mut i8,
+                *const rusqlite::ffi::sqlite3_api_routines,
+            ) -> i32,
+        >(
+            sqlite_vec::sqlite3_vec_init as *const ()
         )));
     }
 }
@@ -184,20 +199,13 @@ fn vec_to_blob(v: &[f32]) -> Vec<u8> {
     v.iter().flat_map(|f| f.to_le_bytes()).collect()
 }
 
-fn now_epoch() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs() as i64
-}
-
 // ---------------------------------------------------------------------------
 // DB operations (run inside spawn_blocking)
 // ---------------------------------------------------------------------------
 
 fn do_insert(conn: &Connection, msg: &IndexInsert) -> Result<(), IndexError> {
     let tx = conn.unchecked_transaction()?;
-    let now = now_epoch();
+    let now = Utc::now().timestamp();
 
     // Delete old vector entries for this path's chunks.
     let old_chunk_ids: Vec<String> = {
@@ -335,8 +343,7 @@ impl Handler<EnsureVecReady> for Index {
             let conn = conn.lock().unwrap();
             do_ensure_vec_ready(&conn, msg.dim)
         })
-        .await
-        .map_err(|e| IndexError::TaskJoin(e.to_string()))?
+        .await?
     }
 }
 
@@ -353,8 +360,7 @@ impl Handler<IndexInsert> for Index {
             let conn = conn.lock().unwrap();
             do_insert(&conn, &msg)
         })
-        .await
-        .map_err(|e| IndexError::TaskJoin(e.to_string()))?
+        .await?
     }
 }
 
@@ -371,8 +377,7 @@ impl Handler<IndexDelete> for Index {
             let conn = conn.lock().unwrap();
             do_delete(&conn, &msg.path)
         })
-        .await
-        .map_err(|e| IndexError::TaskJoin(e.to_string()))?
+        .await?
     }
 }
 
@@ -389,8 +394,7 @@ impl Handler<IndexSearch> for Index {
             let conn = conn.lock().unwrap();
             do_search(&conn, &msg)
         })
-        .await
-        .map_err(|e| IndexError::TaskJoin(e.to_string()))?
+        .await?
     }
 }
 
@@ -398,11 +402,9 @@ impl Handler<IndexSearch> for Index {
 mod tests {
     use uuid::Uuid;
 
+    use super::super::message::{Chunk, EnsureVecReady, IndexDelete, IndexInsert, IndexSearch};
     use super::*;
-    use crate::{
-        llm::Embedding,
-        memory::messages::{Chunk, EnsureVecReady, IndexDelete, IndexInsert, IndexSearch},
-    };
+    use crate::llm::Embedding;
 
     fn test_index() -> Index {
         Index::open_in_memory().unwrap()

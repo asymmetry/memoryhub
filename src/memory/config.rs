@@ -21,10 +21,18 @@ pub struct MemoryConfig {
     /// processes its pending set. Zero disables batching (process per event).
     #[serde(default = "default_synthesizer_cooldown_secs")]
     pub synthesizer_cooldown_secs: u64,
+    /// Maximum size in bytes for a single synthesized output file before the
+    /// writer rolls over to a suffixed name (`{date}-1.md`, `{date}-2.md`, …).
+    #[serde(default = "default_synthesis_max_file_bytes")]
+    pub synthesis_max_file_bytes: u64,
 }
 
 fn default_synthesizer_cooldown_secs() -> u64 {
     300
+}
+
+fn default_synthesis_max_file_bytes() -> u64 {
+    1024 * 1024
 }
 
 impl Default for MemoryConfig {
@@ -37,6 +45,7 @@ impl Default for MemoryConfig {
             temporal_decay_days: 30,
             hybrid_weight: 0.5,
             synthesizer_cooldown_secs: 300,
+            synthesis_max_file_bytes: 1024 * 1024,
         }
     }
 }

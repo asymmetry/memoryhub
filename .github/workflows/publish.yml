@@ -1,0 +1,33 @@
+name: Publish
+
+on:
+  release:
+    types: [published]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  publish:
+    name: publish
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: install rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      ##
+      - name: dry run publish memoryhub
+        run: cargo publish -p memoryhub --dry-run
+      - name: publish memoryhub
+        run: |
+          output=$(cargo publish -p memoryhub 2>&1) || {
+            if echo "$output" | grep -q "already exists"; then
+              echo "memoryhub version already published, skipping"
+            else
+              echo "$output"
+              exit 1
+            fi
+          }
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CRATES_IO_TOKEN }}

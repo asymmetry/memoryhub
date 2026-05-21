@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::ConfigError;
 pub use crate::llm::LlmConfig;
-pub use crate::memory::config::MemoryConfig;
+pub use crate::memory::MemoryConfig;
 
 /// Full application configuration loaded from `config.toml`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

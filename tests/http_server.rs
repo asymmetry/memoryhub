@@ -9,7 +9,7 @@ use clawchorus::{
     config::ServerConfig,
     http::{HttpServer, HttpServerState, build_router},
     llm::{LlmConfig, LlmService},
-    memory::{MemoryManager, config::MemoryConfig},
+    memory::{MemoryConfig, MemoryManager},
 };
 
 fn test_config(dir: &std::path::Path) -> MemoryConfig {
@@ -27,7 +27,7 @@ async fn spawn_memory_manager(dir: &std::path::Path) -> Address<MemoryManager> {
         ..Default::default()
     };
     let (llm_addr, _llm_handle) = LlmService::new(llm_cfg).start("llm-test").unwrap();
-    let mm = MemoryManager::new(test_config(dir), llm_addr).unwrap();
+    let mm = MemoryManager::new(test_config(dir), llm_addr);
     let (mm_addr, _mm_handle) = mm.start("memory-manager").unwrap();
     Box::leak(Box::new(_mm_handle));
     Box::leak(Box::new(_llm_handle));
@@ -91,7 +91,6 @@ async fn write_then_read_then_delete_then_read_404() {
             r#"{{
                 "username":"alice",
                 "agent_id":"{agent_id}",
-                "memory_type":"daily_note",
                 "filename":"test.md",
                 "content":"hello"
             }}"#
@@ -111,7 +110,6 @@ async fn write_then_read_then_delete_then_read_404() {
             r#"{{
                 "username":"alice",
                 "agent_id":"{agent_id}",
-                "memory_type":"daily_note",
                 "filename":"test.md"
             }}"#
         )))
@@ -130,7 +128,6 @@ async fn write_then_read_then_delete_then_read_404() {
             r#"{{
                 "username":"alice",
                 "agent_id":"{agent_id}",
-                "memory_type":"daily_note",
                 "filename":"test.md"
             }}"#
         )))
@@ -148,7 +145,6 @@ async fn write_then_read_then_delete_then_read_404() {
             r#"{{
                 "username":"alice",
                 "agent_id":"{agent_id}",
-                "memory_type":"daily_note",
                 "filename":"test.md"
             }}"#
         )))
@@ -175,7 +171,6 @@ async fn search_after_write_returns_results() {
             r#"{{
                 "username":"alice",
                 "agent_id":"{agent_id}",
-                "memory_type":"daily_note",
                 "filename":"notes.md",
                 "content":"Rust programming language is great"
             }}"#

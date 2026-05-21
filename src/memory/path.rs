@@ -1,74 +1,294 @@
 //! Path derivation utilities for the Memory Manager.
 //!
-//! Layout: `{username}/{agent_id}/{memory_type}/{filename}`
+//! Raw layout: `{username}/{agent_id}/{filename}`. The agent embeds any sub-path directly in
+//! `filename` by flattening every `/` and `\` in it to `_` so the result is a single path
+//! segment.
+//!
+//! Synthesized layout: `[{username}/]_synthesized/YYYY-MM-DD-{n}.md`. Each synthesis run writes to
+//! the greatest existing file (ordered by date then numeric suffix) in the target folder, or
+//! creates a fresh `{today}-01.md`, and rolls over to the next suffix when the current file is
+//! already at or above the configured size cap.
 
+use std::path::{Path, PathBuf};
+
+use chrono::NaiveDate;
+use tokio::fs;
 use uuid::Uuid;
 
-use crate::memory::MemoryType;
+use crate::llm::SynthesisTarget;
 
-/// Derive the relative filesystem path for a memory file.
-pub fn derive_rel_path(
-    username: &str,
-    agent_id: Uuid,
-    memory_type: MemoryType,
-    filename: &str,
-) -> String {
-    let type_dir = match memory_type {
-        MemoryType::DailyNote => "daily_note",
-        MemoryType::LongTerm => "long_term",
-    };
-    format!("{}/{}/{}/{}", username, agent_id, type_dir, filename)
-}
-
-/// Per-user synthesized summary path: `{username}/_synthesized/summary.md`.
+/// Derive the storage path for a raw memory file.
 ///
-/// A per-user summary folds both memory types together, so there is no
-/// `memory_type` segment.
-pub fn per_user_synthesis_path(username: &str) -> String {
-    format!("{}/_synthesized/summary.md", username)
+/// Any `/` or `\` inside `filename` is replaced with `_` so the original
+/// name collapses to a single segment.
+#[inline]
+pub fn get_raw_path(username: &str, agent_id: Uuid, filename: &str) -> String {
+    format!(
+        "{}/{}/{}",
+        username,
+        agent_id,
+        filename.replace(['/', '\\'], "_")
+    )
 }
 
-/// Global (cross-user) synthesized summary path: `_synthesized/summary.md`.
-pub fn global_synthesis_path() -> String {
-    "_synthesized/summary.md".to_string()
+/// Relative folder (under `memory_dir`) where synthesized files for `target` live.
+#[inline]
+fn synthesis_folder(target: &SynthesisTarget) -> String {
+    match target {
+        SynthesisTarget::User(u) => format!("{}/_synthesized", u),
+        SynthesisTarget::Global => "_synthesized".to_string(),
+    }
+}
+
+/// Return the relative path the synthesizer should write to next for `target`.
+///
+/// Picks the lexicographically greatest existing `{date}-{n}.md` in the target folder. If that
+/// file's on-disk size is at or above `max_file_bytes`, rolls over to the next suffixed file. If
+/// no synthesized file exists yet, returns `{today}-01.md`.
+pub async fn current_synthesis_path(
+    memory_dir: &Path,
+    target: &SynthesisTarget,
+    today: NaiveDate,
+    max_size: u64,
+) -> String {
+    let folder_rel = synthesis_folder(target);
+    let folder_abs = memory_dir.join(&folder_rel);
+    let today_str = today.format("%Y-%m-%d").to_string();
+
+    let candidate = match find_latest_synthesis_file(&folder_abs).await {
+        Some((name, size)) if size < max_size => name,
+        Some((name, _)) => next_filename(&name, &today_str),
+        None => format!("{}-01.md", today_str),
+    };
+
+    format!("{}/{}", folder_rel, candidate)
+}
+
+/// Return the relative path of the most recently written synthesized file for `target`, or `None`
+/// if no synthesized file exists yet.
+pub async fn get_latest_synthesis_file(
+    memory_dir: &Path,
+    target: &SynthesisTarget,
+) -> Option<String> {
+    let folder_rel = synthesis_folder(target);
+    let folder_abs = memory_dir.join(&folder_rel);
+    find_latest_synthesis_file(&folder_abs)
+        .await
+        .map(|(name, _)| format!("{}/{}", folder_rel, name))
+}
+
+/// Returns `(filename, size)` for the latest synthesis file.
+async fn find_latest_synthesis_file(folder_abs: &Path) -> Option<(String, u64)> {
+    let mut entries = fs::read_dir(folder_abs).await.ok()?;
+
+    let mut best: Option<(String, PathBuf, (String, u32))> = None;
+    while let Ok(Some(entry)) = entries.next_entry().await {
+        let path = entry.path();
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        let Some(key) = parse_filename(name) else {
+            continue;
+        };
+        match &best {
+            Some((_, _, k)) if &key <= k => {}
+            _ => best = Some((name.to_string(), path, key)),
+        }
+    }
+
+    let (name, path, _) = best?;
+    let size = fs::metadata(&path).await.ok()?.len();
+
+    Some((name, size))
+}
+
+/// Parses `YYYY-MM-DD-N.md` into a `(date, suffix)` key suitable for ordering. Returns `None` for
+/// any other name.
+#[inline]
+fn parse_filename(name: &str) -> Option<(String, u32)> {
+    let stem = name.strip_suffix(".md")?;
+    let mut parts = stem.splitn(4, '-');
+    let y = parts.next()?;
+    let m = parts.next()?;
+    let d = parts.next()?;
+    let n = parts.next()?;
+    if y.len() != 4 || !y.chars().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    if m.len() != 2 || !m.chars().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    if d.len() != 2 || !d.chars().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    if n.is_empty() || !n.chars().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    let date = format!("{y}-{m}-{d}");
+    let suffix = n.parse().ok()?;
+
+    Some((date, suffix))
+}
+
+/// Given the current synthesis file (e.g. `2026-05-20-02.md`), return the next
+/// valid filename.
+///
+/// If the existing file is from an earlier date, jump to `{today}-1.md`.
+/// Otherwise increment the trailing `-N` counter.
+#[inline]
+fn next_filename(current: &str, today: &str) -> String {
+    let Some((date, suffix)) = parse_filename(current) else {
+        return format!("{}-01.md", today);
+    };
+    if date != today {
+        return format!("{}-01.md", today);
+    }
+    format!("{}-{:02}.md", today, suffix.saturating_add(1))
 }
 
 #[cfg(test)]
 mod tests {
-    use uuid::Uuid;
+    use tokio::fs;
 
     use super::*;
 
+    fn date(y: i32, m: u32, d: u32) -> NaiveDate {
+        NaiveDate::from_ymd_opt(y, m, d).unwrap()
+    }
+
     #[test]
-    fn daily_note_path() {
+    fn simple_filename_path() {
         let agent_id = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440000").unwrap();
-        let path = derive_rel_path("alice", agent_id, MemoryType::DailyNote, "2026-03-31.md");
+        let path = get_raw_path("alice", agent_id, "2026-03-31.md");
         assert_eq!(
             path,
-            "alice/550e8400-e29b-41d4-a716-446655440000/daily_note/2026-03-31.md"
+            "alice/550e8400-e29b-41d4-a716-446655440000/2026-03-31.md"
         );
     }
 
     #[test]
-    fn long_term_path() {
+    fn filename_with_slash_is_flattened() {
         let agent_id = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440000").unwrap();
-        let path = derive_rel_path("bob", agent_id, MemoryType::LongTerm, "MEMORY.md");
+        let path = get_raw_path("alice", agent_id, "notes/2026-03-31.md");
         assert_eq!(
             path,
-            "bob/550e8400-e29b-41d4-a716-446655440000/long_term/MEMORY.md"
+            "alice/550e8400-e29b-41d4-a716-446655440000/notes_2026-03-31.md"
         );
-    }
 
-    #[test]
-    fn per_user_synthesis_path_has_no_memory_type() {
+        let path = get_raw_path("alice", agent_id, "notes\\2026-03-31.md");
         assert_eq!(
-            super::per_user_synthesis_path("alice"),
-            "alice/_synthesized/summary.md"
+            path,
+            "alice/550e8400-e29b-41d4-a716-446655440000/notes_2026-03-31.md"
         );
     }
 
-    #[test]
-    fn global_synthesis_path_is_top_level() {
-        assert_eq!(global_synthesis_path(), "_synthesized/summary.md");
+    #[tokio::test]
+    async fn synthesis_path_uses_date_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = current_synthesis_path(
+            dir.path(),
+            &SynthesisTarget::User("alice".into()),
+            date(2026, 5, 20),
+            1_048_576,
+        )
+        .await;
+        assert_eq!(path, "alice/_synthesized/2026-05-20-01.md");
+
+        let path = current_synthesis_path(
+            dir.path(),
+            &SynthesisTarget::Global,
+            date(2026, 5, 20),
+            1024,
+        )
+        .await;
+        assert_eq!(path, "_synthesized/2026-05-20-01.md");
+    }
+
+    #[tokio::test]
+    async fn synthesis_path_reuses_existing_dated_file_under_cap() {
+        let dir = tempfile::tempdir().unwrap();
+        let folder = dir.path().join("alice").join("_synthesized");
+        fs::create_dir_all(&folder).await.unwrap();
+        fs::write(folder.join("2026-05-20-01.md"), b"short")
+            .await
+            .unwrap();
+
+        let path = current_synthesis_path(
+            dir.path(),
+            &SynthesisTarget::User("alice".into()),
+            date(2026, 5, 20),
+            1024,
+        )
+        .await;
+        assert_eq!(path, "alice/_synthesized/2026-05-20-01.md");
+    }
+
+    #[tokio::test]
+    async fn synthesis_path_rolls_over_increments_suffix() {
+        let dir = tempfile::tempdir().unwrap();
+        let folder = dir.path().join("alice").join("_synthesized");
+        fs::create_dir_all(&folder).await.unwrap();
+        fs::write(folder.join("2026-05-20-01.md"), vec![b'x'; 1024])
+            .await
+            .unwrap();
+        fs::write(folder.join("2026-05-20-02.md"), vec![b'x'; 1024])
+            .await
+            .unwrap();
+
+        let path = current_synthesis_path(
+            dir.path(),
+            &SynthesisTarget::User("alice".into()),
+            date(2026, 5, 20),
+            1024,
+        )
+        .await;
+        assert_eq!(path, "alice/_synthesized/2026-05-20-03.md");
+    }
+
+    #[tokio::test]
+    async fn synthesis_path_starts_fresh_on_new_date() {
+        let dir = tempfile::tempdir().unwrap();
+        let folder = dir.path().join("alice").join("_synthesized");
+        fs::create_dir_all(&folder).await.unwrap();
+        fs::write(folder.join("2026-05-19-01.md"), vec![b'x'; 1024])
+            .await
+            .unwrap();
+
+        let path = current_synthesis_path(
+            dir.path(),
+            &SynthesisTarget::User("alice".into()),
+            date(2026, 5, 20),
+            1024,
+        )
+        .await;
+        assert_eq!(path, "alice/_synthesized/2026-05-20-01.md");
+    }
+
+    #[tokio::test]
+    async fn latest_synthesis_path_picks_lexicographic_max() {
+        let dir = tempfile::tempdir().unwrap();
+        let folder = dir.path().join("alice").join("_synthesized");
+        fs::create_dir_all(&folder).await.unwrap();
+        fs::write(folder.join("2026-05-19-01.md"), b"a")
+            .await
+            .unwrap();
+        fs::write(folder.join("2026-05-20-01.md"), b"b")
+            .await
+            .unwrap();
+        fs::write(folder.join("2026-05-20-02.md"), b"c")
+            .await
+            .unwrap();
+
+        let path =
+            get_latest_synthesis_file(dir.path(), &SynthesisTarget::User("alice".into())).await;
+        assert_eq!(path.as_deref(), Some("alice/_synthesized/2026-05-20-02.md"));
+    }
+
+    #[tokio::test]
+    async fn latest_synthesis_path_returns_none_when_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let path =
+            get_latest_synthesis_file(dir.path(), &SynthesisTarget::User("alice".into())).await;
+        assert!(path.is_none());
     }
 }

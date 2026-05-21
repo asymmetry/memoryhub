@@ -58,7 +58,7 @@ impl Actor for ClawChorus {
 
         let (memory_addr, memory_handle) = MemoryManager::create("memory-manager", |child_ctx| {
             child_ctx.set_supervisor(Some(ctx.address().into()));
-            MemoryManager::new(memory, llm_addr.clone())
+            Ok(MemoryManager::new(memory, llm_addr.clone()))
         })?;
 
         let (http_addr, http_handle) = HttpServer::create("http-server", |child_ctx| {

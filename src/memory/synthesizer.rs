@@ -8,56 +8,59 @@
 //! this actor only reads sources, writes results, and indexes them.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::path::PathBuf;
 use std::time::Duration;
 
-use acktor::{Actor, ActorContext, Address, Context, Handler, Message};
+use acktor::{Actor, ActorContext, Address, Context, Handler, Message, utils::debug_trace};
+use chrono::Utc;
 use tokio::time::Instant;
-use tracing::{info, trace, warn};
+use tracing::{debug, info, trace, warn};
 
+use super::chunking::chunk_text;
+use super::config::MemoryConfig;
+use super::error::MemoryError;
+use super::index::Index;
+use super::message::{Chunk, EnsureVecReady, FileChanged, IndexInsert, StorageRead, StorageWrite};
+use super::path::{current_synthesis_path, get_latest_synthesis_file};
+use super::storage::Storage;
 use crate::llm::{Embed, EmbedResult, LlmService, SourceDoc, SynthesisTarget, Synthesize};
-use crate::memory::{
-    chunking::chunk_text,
-    error::MemoryError,
-    index::Index,
-    messages::{Chunk, EnsureVecReady, FileChanged, IndexInsert, StorageRead, StorageWrite},
-    path::{global_synthesis_path, per_user_synthesis_path},
-    storage::Storage,
-};
 
 #[derive(Debug, Clone, Message)]
 #[result_type(())]
 struct CooldownTick;
 
 pub struct Synthesizer {
+    llm: Address<LlmService>,
     storage: Address<Storage>,
     index: Address<Index>,
-    llm: Address<LlmService>,
-    cooldown: Duration,
-    chunk_size: usize,
-    chunk_overlap: usize,
+    config: MemoryConfig,
     pending: BTreeSet<String>,
     last_event: Option<Instant>,
 }
 
 impl Synthesizer {
     pub fn new(
+        llm: Address<LlmService>,
         storage: Address<Storage>,
         index: Address<Index>,
-        llm: Address<LlmService>,
-        cooldown_secs: u64,
-        chunk_size: usize,
-        chunk_overlap: usize,
+        config: MemoryConfig,
     ) -> Self {
         Self {
+            llm,
             storage,
             index,
-            llm,
-            cooldown: Duration::from_secs(cooldown_secs),
-            chunk_size,
-            chunk_overlap,
+            config,
             pending: BTreeSet::new(),
             last_event: None,
         }
+    }
+
+    fn memory_dir(&self) -> PathBuf {
+        PathBuf::from(&self.config.memory_dir)
+    }
+
+    fn cooldown(&self) -> Duration {
+        Duration::from_secs(self.config.synthesizer_cooldown_secs)
     }
 
     /// Run the two-pass synthesis over the pending set.
@@ -66,7 +69,8 @@ impl Synthesizer {
             return;
         }
         let paths: Vec<String> = std::mem::take(&mut self.pending).into_iter().collect();
-        info!("Synthesizer: processing {} pending paths", paths.len());
+
+        debug!("Synthesizer: processing {} pending paths", paths.len());
 
         // Group the changed paths by owning user.
         let mut by_user: BTreeMap<String, Vec<String>> = BTreeMap::new();
@@ -97,32 +101,52 @@ impl Synthesizer {
         }
     }
 
-    /// Re-synthesize one user from their changed files. Returns `true` if a
-    /// summary was written, `false` if there was nothing to synthesize.
     async fn synthesize_user(&self, user: &str, changed: &[String]) -> Result<bool, MemoryError> {
         let mut sources = Vec::new();
+        let mut deleted = Vec::new();
         for path in changed {
             match self.storage_read(path).await? {
                 Some(content) => sources.push(SourceDoc {
                     name: path.clone(),
                     content,
                 }),
-                None => trace!("Synthesizer: source {} vanished, skipping", path),
+                None => deleted.push(path.clone()),
             }
         }
-        if sources.is_empty() {
+        if sources.is_empty() && deleted.is_empty() {
             return Ok(false);
         }
+        if !deleted.is_empty() {
+            trace!(
+                "Synthesizer: {} source(s) deleted for {}",
+                deleted.len(),
+                user
+            );
+            sources.push(SourceDoc {
+                name: "_deleted_sources".to_string(),
+                content: format!(
+                    "The following memory files were deleted. Remove any content in the running summary that was sourced from them, and do not reference them going forward:\n{}",
+                    deleted.join("\n")
+                ),
+            });
+        }
 
-        let summary_path = per_user_synthesis_path(user);
-        let prior_summary = self.storage_read(&summary_path).await?;
+        let target = SynthesisTarget::User(user.to_string());
+        let prior_summary = match get_latest_synthesis_file(&self.memory_dir(), &target).await {
+            Some(path) => self.storage_read(&path).await?,
+            None => None,
+        };
         let synthesis = self
-            .request_synthesis(
-                SynthesisTarget::User(user.to_string()),
-                prior_summary,
-                sources,
-            )
+            .request_synthesis(target.clone(), prior_summary, sources)
             .await?;
+        let today = Utc::now().date_naive();
+        let summary_path = current_synthesis_path(
+            &self.memory_dir(),
+            &target,
+            today,
+            self.config.synthesis_max_file_bytes,
+        )
+        .await;
         self.write_synthesis(&summary_path, &synthesis).await?;
         info!(
             "Synthesizer: per-user synthesis written to {}",
@@ -135,7 +159,11 @@ impl Synthesizer {
     async fn synthesize_global(&self, changed_users: &[String]) -> Result<(), MemoryError> {
         let mut sources = Vec::new();
         for user in changed_users {
-            let path = per_user_synthesis_path(user);
+            let user_target = SynthesisTarget::User(user.clone());
+            let Some(path) = get_latest_synthesis_file(&self.memory_dir(), &user_target).await
+            else {
+                continue;
+            };
             if let Some(content) = self.storage_read(&path).await? {
                 sources.push(SourceDoc {
                     name: path,
@@ -147,11 +175,22 @@ impl Synthesizer {
             return Ok(());
         }
 
-        let summary_path = global_synthesis_path();
-        let prior_summary = self.storage_read(&summary_path).await?;
+        let prior_summary =
+            match get_latest_synthesis_file(&self.memory_dir(), &SynthesisTarget::Global).await {
+                Some(path) => self.storage_read(&path).await?,
+                None => None,
+            };
         let synthesis = self
             .request_synthesis(SynthesisTarget::Global, prior_summary, sources)
             .await?;
+        let today = Utc::now().date_naive();
+        let summary_path = current_synthesis_path(
+            &self.memory_dir(),
+            &SynthesisTarget::Global,
+            today,
+            self.config.synthesis_max_file_bytes,
+        )
+        .await;
         self.write_synthesis(&summary_path, &synthesis).await?;
         info!("Synthesizer: global synthesis written to {}", summary_path);
         Ok(())
@@ -161,7 +200,7 @@ impl Synthesizer {
     async fn write_synthesis(&self, path: &str, content: &str) -> Result<(), MemoryError> {
         self.storage_write(path, content).await?;
 
-        let text_chunks = chunk_text(content, self.chunk_size, self.chunk_overlap);
+        let text_chunks = chunk_text(content, self.config.chunk_size, self.config.chunk_overlap);
         if text_chunks.is_empty() {
             return Ok(());
         }
@@ -187,9 +226,8 @@ impl Synthesizer {
             .send(StorageRead {
                 path: path.to_string(),
             })
-            .await
-            .map_err(|e| MemoryError::Actor(e.to_string()))?;
-        let res = fut.await.map_err(|e| MemoryError::Actor(e.to_string()))?;
+            .await?;
+        let res = fut.await?;
         Ok(res?)
     }
 
@@ -200,19 +238,14 @@ impl Synthesizer {
                 path: path.to_string(),
                 content: content.to_string(),
             })
-            .await
-            .map_err(|e| MemoryError::Actor(e.to_string()))?;
-        fut.await.map_err(|e| MemoryError::Actor(e.to_string()))??;
+            .await?;
+        fut.await??;
         Ok(())
     }
 
     async fn embed(&self, texts: Vec<String>) -> Result<EmbedResult, MemoryError> {
-        let fut = self
-            .llm
-            .send(Embed { texts })
-            .await
-            .map_err(|e| MemoryError::Actor(e.to_string()))?;
-        let res = fut.await.map_err(|e| MemoryError::Actor(e.to_string()))?;
+        let fut = self.llm.send(Embed { texts }).await?;
+        let res = fut.await?;
         Ok(res?)
     }
 
@@ -229,9 +262,8 @@ impl Synthesizer {
                 prior_summary,
                 sources,
             })
-            .await
-            .map_err(|e| MemoryError::Actor(e.to_string()))?;
-        let res = fut.await.map_err(|e| MemoryError::Actor(e.to_string()))?;
+            .await?;
+        let res = fut.await?;
         Ok(res?)
     }
 
@@ -244,12 +276,8 @@ impl Synthesizer {
     ) -> Result<(), MemoryError> {
         if let Some(first) = chunks.first() {
             let dim = first.embedding.0.len();
-            let fut = self
-                .index
-                .send(EnsureVecReady { dim })
-                .await
-                .map_err(|e| MemoryError::Actor(e.to_string()))?;
-            fut.await.map_err(|e| MemoryError::Actor(e.to_string()))??;
+            let fut = self.index.send(EnsureVecReady { dim }).await?;
+            fut.await??;
         }
         let fut = self
             .index
@@ -260,9 +288,8 @@ impl Synthesizer {
                 model,
                 chunks,
             })
-            .await
-            .map_err(|e| MemoryError::Actor(e.to_string()))?;
-        fut.await.map_err(|e| MemoryError::Actor(e.to_string()))??;
+            .await?;
+        fut.await??;
         Ok(())
     }
 }
@@ -276,12 +303,12 @@ impl Handler<FileChanged> for Synthesizer {
     type Result = ();
 
     async fn handle(&mut self, msg: FileChanged, ctx: &mut Self::Context) {
-        trace!("Handle command {:?}", msg);
+        debug_trace!("Handle command {:?}", msg);
         self.pending.insert(msg.rel_path);
         self.last_event = Some(Instant::now());
 
         let addr = ctx.address().clone();
-        let cooldown = self.cooldown;
+        let cooldown = self.cooldown();
         tokio::spawn(async move {
             tokio::time::sleep(cooldown).await;
             let _ = addr.do_send(CooldownTick).await;
@@ -293,8 +320,8 @@ impl Handler<CooldownTick> for Synthesizer {
     type Result = ();
 
     async fn handle(&mut self, msg: CooldownTick, _ctx: &mut Self::Context) {
-        trace!("Handle command {:?}", msg);
-        let should_process = matches!(self.last_event, Some(t) if t.elapsed() >= self.cooldown);
+        debug_trace!("Handle command {:?}", msg);
+        let should_process = matches!(self.last_event, Some(t) if t.elapsed() >= self.cooldown());
         if !should_process {
             return;
         }
@@ -304,13 +331,13 @@ impl Handler<CooldownTick> for Synthesizer {
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
+    use tokio::task::JoinHandle;
+
     use super::*;
     use crate::llm::LlmService;
-    use crate::memory::index::Index;
-    use crate::memory::messages::StorageWrite;
-    use crate::memory::storage::Storage;
-    use std::path::PathBuf;
-    use tokio::task::JoinHandle;
+    use crate::memory::{index::Index, message::StorageWrite, storage::Storage};
 
     async fn boot() -> (
         Address<Storage>,
@@ -337,7 +364,7 @@ mod tests {
 
         storage
             .send(StorageWrite {
-                path: "alice/agent1/daily_note/x.md".to_string(),
+                path: "alice/agent1/x.md".to_string(),
                 content: "hello world".to_string(),
             })
             .await
@@ -346,11 +373,17 @@ mod tests {
             .unwrap()
             .unwrap();
 
-        let synth = Synthesizer::new(storage.clone(), index, llm, 0, 400, 80);
+        let cfg = MemoryConfig {
+            memory_dir: dir.path().to_string_lossy().to_string(),
+            db_path: ":memory:".to_string(),
+            synthesizer_cooldown_secs: 0,
+            ..MemoryConfig::default()
+        };
+        let synth = Synthesizer::new(llm, storage.clone(), index, cfg);
         let (addr, _handle) = synth.start("synth").unwrap();
 
         addr.send(FileChanged {
-            rel_path: "alice/agent1/daily_note/x.md".to_string(),
+            rel_path: "alice/agent1/x.md".to_string(),
         })
         .await
         .unwrap()
@@ -359,15 +392,24 @@ mod tests {
 
         tokio::time::sleep(Duration::from_millis(200)).await;
 
-        let summary = dir
-            .path()
-            .join("alice")
-            .join("_synthesized")
-            .join("summary.md");
+        let folder = dir.path().join("alice").join("_synthesized");
         assert!(
-            summary.is_file(),
-            "expected per-user summary at {:?}",
-            summary
+            folder.is_dir(),
+            "expected _synthesized folder at {folder:?}"
+        );
+        let entries: Vec<_> = std::fs::read_dir(&folder)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| {
+                e.path()
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|s| s.ends_with(".md"))
+            })
+            .collect();
+        assert!(
+            !entries.is_empty(),
+            "expected at least one dated synthesis file in {folder:?}"
         );
     }
 }

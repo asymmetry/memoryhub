@@ -5,13 +5,11 @@
 
 use std::path::PathBuf;
 
-use acktor::{Actor, Context, message::Handler};
-use tracing::{trace, warn};
+use acktor::{Actor, Context, message::Handler, utils::debug_trace};
+use tokio::fs;
 
-use crate::memory::{
-    error::StorageError,
-    messages::{StorageDelete, StorageRead, StorageWrite},
-};
+use super::error::StorageError;
+use super::message::{StorageDelete, StorageRead, StorageWrite};
 
 /// The Storage actor. Owns the root directory path.
 pub struct Storage {
@@ -19,6 +17,7 @@ pub struct Storage {
 }
 
 impl Storage {
+    /// Constructs a new `Storage` actor.
     pub fn new(root: PathBuf) -> Self {
         Self { root }
     }
@@ -41,11 +40,13 @@ impl Handler<StorageWrite> for Storage {
         msg: StorageWrite,
         _ctx: &mut Self::Context,
     ) -> Result<(), StorageError> {
-        trace!("Handle command {:?}", msg);
+        debug_trace!("Handle command {:?}", msg);
+
         let path = self.resolve(&msg.path);
+        let tmp_path = path.with_extension("tmp");
 
         if let Some(parent) = path.parent() {
-            tokio::fs::create_dir_all(parent)
+            fs::create_dir_all(parent)
                 .await
                 .map_err(|e| StorageError::Io {
                     path: path.clone(),
@@ -53,14 +54,14 @@ impl Handler<StorageWrite> for Storage {
                 })?;
         }
 
-        let tmp_path = path.with_extension("tmp");
-        tokio::fs::write(&tmp_path, &msg.content)
+        fs::write(&tmp_path, &msg.content)
             .await
             .map_err(|e| StorageError::Io {
                 path: tmp_path.clone(),
                 source: e,
             })?;
-        tokio::fs::rename(&tmp_path, &path)
+
+        fs::rename(&tmp_path, &path)
             .await
             .map_err(|e| StorageError::Io {
                 path: path.clone(),
@@ -79,10 +80,10 @@ impl Handler<StorageRead> for Storage {
         msg: StorageRead,
         _ctx: &mut Self::Context,
     ) -> Result<Option<String>, StorageError> {
-        trace!("Handle command {:?}", msg);
-        let path = self.resolve(&msg.path);
+        debug_trace!("Handle command {:?}", msg);
 
-        match tokio::fs::read_to_string(&path).await {
+        let path = self.resolve(&msg.path);
+        match fs::read_to_string(&path).await {
             Ok(content) => Ok(Some(content)),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
             Err(e) => Err(StorageError::Io { path, source: e }),
@@ -98,16 +99,14 @@ impl Handler<StorageDelete> for Storage {
         msg: StorageDelete,
         _ctx: &mut Self::Context,
     ) -> Result<(), StorageError> {
-        trace!("Handle command {:?}", msg);
-        let path = self.resolve(&msg.path);
+        debug_trace!("Handle command {:?}", msg);
 
-        match tokio::fs::remove_file(&path).await {
-            Ok(()) => Ok(()),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                warn!(path = %path.display(), "Storage: file already gone");
-                Ok(())
+        let path = self.resolve(&msg.path);
+        match fs::remove_file(&path).await {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+                Err(StorageError::Io { path, source: e })
             }
-            Err(e) => Err(StorageError::Io { path, source: e }),
+            _ => Ok(()),
         }
     }
 }
@@ -115,7 +114,7 @@ impl Handler<StorageDelete> for Storage {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::memory::messages::{StorageDelete, StorageRead, StorageWrite};
+    use crate::memory::message::{StorageDelete, StorageRead, StorageWrite};
 
     #[tokio::test]
     async fn write_then_read() {

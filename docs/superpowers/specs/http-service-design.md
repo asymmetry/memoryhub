@@ -43,17 +43,16 @@ All bodies are JSON. All response bodies are JSON. All routes are nested under t
 | Method | Path                  | Body                                                   | Actor message  | 200 reply                          |
 | ------ | --------------------- | ------------------------------------------------------ | -------------- | ---------------------------------- |
 | GET    | `/v1/health`          | —                                                      | —              | `{"status":"ok"}`                  |
-| POST   | `/v1/memories/write`  | `{username, agent_id, memory_type, filename, content}` | `FileOpWrite`  | `{}`                               |
-| POST   | `/v1/memories/read`   | `{username, agent_id, memory_type, filename}`          | `FileOpRead`   | `{"content": "..."}` or 404        |
-| POST   | `/v1/memories/delete` | `{username, agent_id, memory_type, filename}`          | `FileOpDelete` | `{}`                               |
+| POST   | `/v1/memories/write`  | `{username, agent_id, filename, content}`              | `FileOpWrite`  | `{}`                               |
+| POST   | `/v1/memories/read`   | `{username, agent_id, filename}`                       | `FileOpRead`   | `{"content": "..."}` or 404        |
+| POST   | `/v1/memories/delete` | `{username, agent_id, filename}`                       | `FileOpDelete` | `{}`                               |
 | POST   | `/v1/search`          | `{username, agent_id, query}`                          | `Search`       | `{"results": [SearchResult, ...]}` |
 
 ### Field conventions
 
 - `username` — string
 - `agent_id` — UUID string (e.g. `"550e8400-e29b-41d4-a716-446655440000"`)
-- `memory_type` — lowercase string matching the `MemoryType` enum: `"daily_note"` or `"long_term"`
-- `filename` — string (e.g. `"2026-05-13.md"`)
+- `filename` — string (e.g. `"2026-05-13.md"` or `"notes/2026-05-13.md"`). Opaque to the service; any `/` or `\` is flattened to `_` server-side. The agent is responsible for encoding any logical sub-path into this name.
 
 `SearchResult` is serialized as-is from `crate::memory::messages::SearchResult` (`path`, `start_line`, `end_line`, `score`, `snippet`).
 
@@ -104,7 +103,7 @@ The supervisor (`Manager`) spawns `LlmService` and `MemoryManager` first, then c
 
 ## Testing
 
-- **Unit tests on `dto.rs`** — serde round-trip for each request/response struct. Explicitly assert `memory_type` parses from `"daily_note"` / `"long_term"` and rejects other strings.
+- **Unit tests on `dto.rs`** — serde round-trip for each request/response struct.
 - **Unit tests on `error.rs`** — each `HttpError` variant maps to the documented status + body.
 - **Integration tests under `tests/`** — build the router with a stub `MemoryManager` actor (acktor test harness), drive requests via `tower::ServiceExt::oneshot`, assert status and body for the happy path and each error mapping. No real network bind.
 

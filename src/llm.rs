@@ -199,7 +199,7 @@ mod tests {
                 target: crate::llm::SynthesisTarget::User("alice".into()),
                 prior_summary: None,
                 sources: vec![crate::llm::SourceDoc {
-                    name: "alice/a/daily_note/x.md".into(),
+                    name: "alice/a/x.md".into(),
                     content: "hello".into(),
                 }],
             })

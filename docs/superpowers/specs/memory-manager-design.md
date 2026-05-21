@@ -22,12 +22,14 @@ Memory Manager Actor
 
 Messages received by Memory Manager from HTTP Server:
 
-| Message        | Fields                                             | Reply              |
-| -------------- | -------------------------------------------------- | ------------------ |
-| FileOp::Write  | username, agent_id, memory_type, filename, content | Ok / Error         |
-| FileOp::Read   | username, agent_id, memory_type, filename          | content / NotFound |
-| FileOp::Delete | username, agent_id, memory_type, filename          | Ok / Error         |
-| Search         | username, agent_id, query                          | Vec<SearchResult>  |
+| Message        | Fields                                | Reply              |
+| -------------- | ------------------------------------- | ------------------ |
+| FileOp::Write  | username, agent_id, filename, content | Ok / Error         |
+| FileOp::Read   | username, agent_id, filename          | content / NotFound |
+| FileOp::Delete | username, agent_id, filename          | Ok / Error         |
+| Search         | username, agent_id, query             | Vec<SearchResult>  |
+
+`filename` is opaque to the memory manager: the agent embeds any sub-path (e.g. `notes/2026-03-31.md`) directly in it. The memory manager flattens it into a single path segment by replacing every `/` and `\` with `_` before touching disk or index. There is no notion of `memory_type` — that concept lives only in OpenClaw.
 
 ## Internal Messages
 
@@ -68,7 +70,7 @@ Messages between child actors:
 
 ### Write
 
-1. FileOp Actor derives `rel_path` from (username, agent_id, memory_type, filename)
+1. FileOp Actor derives `rel_path` from (username, agent*id, filename) — `filename` is flattened by replacing `/` and `\` with `*`
 2. Send Write(rel_path, content) → Storage
 3. Chunk the content (~400 tokens, 80-token overlap)
 4. Send Embed(chunks) → LLM Service
@@ -101,12 +103,22 @@ Messages between child actors:
 
 **On FileChanged(rel_path):** accumulate the path into a pending set. Processing triggers once the cool-down timer expires, then the timer resets.
 
-**Processing (when cool-down expires)** runs two passes. The Synthesizer feeds only the files that changed this cycle to LLM Service; the long-lived synthesis tasks there preserve prior context, so raw memories are never re-sent in bulk. `prior_summary` is the current on-disk summary, passed so a cold or just-reset task can reseed without losing state. Each synthesis: Read the source files from Storage, send `Synthesize` to LLM Service, chunk and `Embed` the returned text, then Write it to Storage and Insert it into Index.
+**Processing (when cool-down expires)** runs two passes. The Synthesizer feeds only the files that changed this cycle to LLM Service; the long-lived synthesis tasks there preserve prior context, so raw memories are never re-sent in bulk. `prior_summary` is the most recent on-disk synthesized file for that target, passed so a cold or just-reset task can reseed without losing state. Each synthesis: Read the source files from Storage, send `Synthesize` to LLM Service, chunk and `Embed` the returned text, then Write it to Storage and Insert it into Index.
 
-- _Per-user pass_ — group the pending paths by user (first path segment, skipping `_synthesized`). For each affected user: read that user's changed files plus the current `{username}/_synthesized/summary.md` (the `prior_summary`), send `Synthesize(User(username), prior_summary, sources)`, and write the result back to `{username}/_synthesized/summary.md`. A failure for one user is logged and skipped; remaining users still proceed.
-- _Global pass_ — runs if at least one per-user summary was regenerated. The sources are the per-user summaries produced this cycle; with the current `_synthesized/summary.md` as `prior_summary`, send `Synthesize(Global, prior_summary, sources)` and write the result to `_synthesized/summary.md`.
+- _Per-user pass_ — group the pending paths by user (first path segment, skipping `_synthesized`). For each affected user: read that user's changed files plus the user's current synthesized file (the `prior_summary`), send `Synthesize(User(username), prior_summary, sources)`, and write the result to the current per-user synthesized file (see [Synthesized output files](#synthesized-output-files) for the naming and rotation rules). A failure for one user is logged and skipped; remaining users still proceed.
+- _Global pass_ — runs if at least one per-user summary was regenerated. The sources are the per-user summaries produced this cycle; with the current global synthesized file as `prior_summary`, send `Synthesize(Global, prior_summary, sources)` and write the result to the current global synthesized file.
 
-Both `daily_note` and `long_term` raw files feed the same per-user task — there is no per-memory-type synthesis. Both summary files are stable paths, overwritten each run. Finally, clear the pending set.
+All of a user's raw files feed the same per-user task — there is no per-category synthesis. Finally, clear the pending set.
+
+#### Synthesized output files
+
+Synthesized output is not a single overwritten file. It accumulates over time as date-named files with a size cap:
+
+- Filename for a synthesis run on date `D` is `{D}.md` (e.g. `2026-05-20.md`), in UTC.
+- If appending the new content would push the file above the configured cap (`synthesis.max_file_bytes`, default 1 MiB), the writer rolls over to a suffixed file: `{D}-1.md`, `{D}-2.md`, …
+- "Current" synthesized file (used both as the write target and as `prior_summary` for the next run) is the lexicographically greatest existing `{date}[-{n}].md` under the target folder, or a fresh `{today}.md` if none exists.
+- Each synthesis writes the full new synthesized text — it does not diff or merge with the prior file on disk. Accumulation comes from the sequence of dated files, not from concatenation within one file. The cap is enforced by checking the size of the file the writer would otherwise reuse; if it is already at or above the cap, the writer creates the next suffixed file instead.
+- Old files are never deleted by the Synthesizer. Retention/pruning is out of scope for this iteration.
 
 ## Storage Actor
 
@@ -123,21 +135,20 @@ Files on disk are **plain Markdown with no frontmatter**.
 
 All memory files are stored under the configured `memory_dir` root using this path formula:
 
-- `{memory_dir}/{username}/{agent_id}/{memory_type}/{filename}`
+- `{memory_dir}/{username}/{agent_id}/{flattened_filename}`
 
 Where:
 
 - `username` — the OpenClaw user who owns the memory
 - `agent_id` — UUID of the agent that produced it
-- `memory_type` — snake_case directory: `daily_note` or `long_term`
-- `filename` — the original filename (e.g. `2026-03-31.md`, `MEMORY.md`)
+- `flattened_filename` — the original filename with every `/` and `\` replaced by `_` (so `notes/2026-03-31.md` becomes `notes_2026-03-31.md`). The agent is responsible for encoding any logical sub-path into this single name; the memory manager does not interpret it.
 
-Synthesized files produced by the Synthesizer use two levels, each a single stable file overwritten on every synthesis run (no history is kept):
+Synthesized files produced by the Synthesizer live in dated files under `_synthesized` directories at two levels (see [Synthesized output files](#synthesized-output-files) for naming and size-cap rules):
 
-- **Per-user synthesis:** `{memory_dir}/{username}/_synthesized/summary.md`
-- **General (cross-user) synthesis:** `{memory_dir}/_synthesized/summary.md`
+- **Per-user synthesis:** `{memory_dir}/{username}/_synthesized/{date}[-{n}].md`
+- **General (cross-user) synthesis:** `{memory_dir}/_synthesized/{date}[-{n}].md`
 
-A per-user summary folds together both memory types for that user, so there is no `memory_type` segment in synthesized paths. The `_synthesized` directory distinguishes synthesized output from raw agent memories at both levels.
+The `_synthesized` directory distinguishes synthesized output from raw agent memories at both levels.
 
 The `rel_path` passed to Storage messages is always relative to `memory_dir`. Path derivation is the caller's responsibility (FileOp Actor for raw memories, Synthesizer for synthesized files).
 

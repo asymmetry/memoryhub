@@ -9,10 +9,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::llm::Embedding;
-use crate::memory::{
-    MemoryType,
-    error::{IndexError, MemoryError, StorageError},
-};
+use crate::memory::error::{IndexError, MemoryError, StorageError};
 
 // ---------------------------------------------------------------------------
 // Shared types
@@ -22,9 +19,9 @@ use crate::memory::{
 #[derive(Debug)]
 pub struct Chunk {
     pub text: String,
-    /// 1-indexed start line in the original file.
+    /// Start line in the original file (1-indexed).
     pub start_line: u32,
-    /// 1-indexed end line in the original file.
+    /// End line in the original file (1-indexed).
     pub end_line: u32,
     pub embedding: Embedding,
 }
@@ -117,7 +114,6 @@ pub struct IndexSearch {
 pub struct FileOpWrite {
     pub username: String,
     pub agent_id: Uuid,
-    pub memory_type: MemoryType,
     pub filename: String,
     pub content: String,
 }
@@ -128,7 +124,6 @@ pub struct FileOpWrite {
 pub struct FileOpRead {
     pub username: String,
     pub agent_id: Uuid,
-    pub memory_type: MemoryType,
     pub filename: String,
 }
 
@@ -138,7 +133,6 @@ pub struct FileOpRead {
 pub struct FileOpDelete {
     pub username: String,
     pub agent_id: Uuid,
-    pub memory_type: MemoryType,
     pub filename: String,
 }
 
@@ -156,6 +150,7 @@ pub struct Search {
 // ---------------------------------------------------------------------------
 
 /// Fire-and-forget notification that a memory file was written or deleted.
+///
 /// Sent from `FileOp` to the `Synthesizer` after a successful index update.
 #[derive(Debug, Clone, Message)]
 #[result_type(())]
@@ -171,10 +166,10 @@ mod tests {
     #[test]
     fn storage_write_msg_fields() {
         let msg = StorageWrite {
-            path: "alice/agent1/daily_note/2026-03-31.md".to_string(),
+            path: "alice/agent1/2026-03-31.md".to_string(),
             content: "hello".to_string(),
         };
-        assert_eq!(msg.path, "alice/agent1/daily_note/2026-03-31.md");
+        assert_eq!(msg.path, "alice/agent1/2026-03-31.md");
         assert_eq!(msg.content, "hello");
     }
 
@@ -183,7 +178,6 @@ mod tests {
         let msg = FileOpWrite {
             username: "alice".to_string(),
             agent_id: Uuid::new_v4(),
-            memory_type: crate::memory::MemoryType::DailyNote,
             filename: "2026-03-31.md".to_string(),
             content: "hello".to_string(),
         };
@@ -193,7 +187,7 @@ mod tests {
     #[test]
     fn search_result_fields() {
         let sr = SearchResult {
-            path: "alice/agent1/daily_note/2026-03-31.md".to_string(),
+            path: "alice/agent1/2026-03-31.md".to_string(),
             start_line: 1,
             end_line: 10,
             score: 0.95,
@@ -205,9 +199,9 @@ mod tests {
     #[test]
     fn file_changed_msg_fields() {
         let msg = FileChanged {
-            rel_path: "alice/agent1/daily_note/x.md".to_string(),
+            rel_path: "alice/agent1/x.md".to_string(),
         };
-        assert_eq!(msg.rel_path, "alice/agent1/daily_note/x.md");
+        assert_eq!(msg.rel_path, "alice/agent1/x.md");
     }
 
     #[test]

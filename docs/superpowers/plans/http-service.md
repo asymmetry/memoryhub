@@ -152,14 +152,12 @@ Replace `src/http/dto.rs` with:
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::memory::MemoryType;
 use crate::memory::messages::SearchResult;
 
 #[derive(Debug, Deserialize)]
 pub struct WriteRequest {
     pub username: String,
     pub agent_id: Uuid,
-    pub memory_type: MemoryType,
     pub filename: String,
     pub content: String,
 }
@@ -168,7 +166,6 @@ pub struct WriteRequest {
 pub struct ReadRequest {
     pub username: String,
     pub agent_id: Uuid,
-    pub memory_type: MemoryType,
     pub filename: String,
 }
 
@@ -176,7 +173,6 @@ pub struct ReadRequest {
 pub struct DeleteRequest {
     pub username: String,
     pub agent_id: Uuid,
-    pub memory_type: MemoryType,
     pub filename: String,
 }
 
@@ -207,43 +203,21 @@ mod tests {
     use super::*;
 
     #[test]
-    fn write_request_deserializes_snake_case_memory_type() {
+    fn write_request_deserializes() {
         let json = r#"{
             "username": "alice",
             "agent_id": "550e8400-e29b-41d4-a716-446655440000",
-            "memory_type": "daily_note",
             "filename": "2026-05-13.md",
             "content": "hello"
         }"#;
         let req: WriteRequest = serde_json::from_str(json).unwrap();
         assert_eq!(req.username, "alice");
-        assert_eq!(req.memory_type, MemoryType::DailyNote);
+        assert_eq!(
+            req.agent_id,
+            Uuid::parse_str("550e8400-e29b-41d4-a716-446655440000").unwrap()
+        );
         assert_eq!(req.filename, "2026-05-13.md");
         assert_eq!(req.content, "hello");
-    }
-
-    #[test]
-    fn write_request_rejects_unknown_memory_type() {
-        let json = r#"{
-            "username": "alice",
-            "agent_id": "550e8400-e29b-41d4-a716-446655440000",
-            "memory_type": "garbage",
-            "filename": "x.md",
-            "content": ""
-        }"#;
-        assert!(serde_json::from_str::<WriteRequest>(json).is_err());
-    }
-
-    #[test]
-    fn read_request_long_term_memory_type() {
-        let json = r#"{
-            "username": "bob",
-            "agent_id": "550e8400-e29b-41d4-a716-446655440000",
-            "memory_type": "long_term",
-            "filename": "MEMORY.md"
-        }"#;
-        let req: ReadRequest = serde_json::from_str(json).unwrap();
-        assert_eq!(req.memory_type, MemoryType::LongTerm);
     }
 
     #[test]
@@ -276,7 +250,7 @@ mod tests {
 - [ ] **Step 2: Run tests**
 
 Run: `cargo test --lib http::dto`
-Expected: PASS (6 tests).
+Expected: PASS (4 tests).
 
 - [ ] **Step 3: Commit**
 
@@ -435,7 +409,6 @@ pub async fn write(
     let msg = FileOpWrite {
         username: req.username,
         agent_id: req.agent_id,
-        memory_type: req.memory_type,
         filename: req.filename,
         content: req.content,
     };
@@ -454,7 +427,6 @@ pub async fn read(
     let msg = FileOpRead {
         username: req.username,
         agent_id: req.agent_id,
-        memory_type: req.memory_type,
         filename: req.filename,
     };
     let content = mm
@@ -476,7 +448,6 @@ pub async fn delete(
     let msg = FileOpDelete {
         username: req.username,
         agent_id: req.agent_id,
-        memory_type: req.memory_type,
         filename: req.filename,
     };
     mm.send(msg)
@@ -541,12 +512,14 @@ use crate::http::handlers::{delete, health, read, search, write};
 use crate::memory::manager::MemoryManager;
 
 pub fn build_router(mm: Address<MemoryManager>) -> Router {
-    Router::new()
+    let v1 = Router::new()
         .route("/health", get(health))
         .route("/memories/write", post(write))
         .route("/memories/read", post(read))
         .route("/memories/delete", post(delete))
-        .route("/search", post(search))
+        .route("/search", post(search));
+    Router::new()
+        .nest("/v1", v1)
         .layer(TraceLayer::new_for_http())
         .with_state(mm)
 }
@@ -621,7 +594,7 @@ async fn health_returns_ok() {
     let app = build_router(mm);
 
     let req = Request::builder()
-        .uri("/health")
+        .uri("/v1/health")
         .body(Body::empty())
         .unwrap();
     let resp = app.oneshot(req).await.unwrap();
@@ -641,13 +614,12 @@ async fn write_then_read_then_delete_then_read_404() {
     // Write.
     let req = Request::builder()
         .method("POST")
-        .uri("/memories/write")
+        .uri("/v1/memories/write")
         .header("content-type", "application/json")
         .body(Body::from(format!(
             r#"{{
                 "username":"alice",
                 "agent_id":"{agent_id}",
-                "memory_type":"daily_note",
                 "filename":"test.md",
                 "content":"hello"
             }}"#
@@ -661,13 +633,12 @@ async fn write_then_read_then_delete_then_read_404() {
     // Read.
     let req = Request::builder()
         .method("POST")
-        .uri("/memories/read")
+        .uri("/v1/memories/read")
         .header("content-type", "application/json")
         .body(Body::from(format!(
             r#"{{
                 "username":"alice",
                 "agent_id":"{agent_id}",
-                "memory_type":"daily_note",
                 "filename":"test.md"
             }}"#
         )))
@@ -680,13 +651,12 @@ async fn write_then_read_then_delete_then_read_404() {
     // Delete.
     let req = Request::builder()
         .method("POST")
-        .uri("/memories/delete")
+        .uri("/v1/memories/delete")
         .header("content-type", "application/json")
         .body(Body::from(format!(
             r#"{{
                 "username":"alice",
                 "agent_id":"{agent_id}",
-                "memory_type":"daily_note",
                 "filename":"test.md"
             }}"#
         )))
@@ -698,13 +668,12 @@ async fn write_then_read_then_delete_then_read_404() {
     // Read after delete -> 404.
     let req = Request::builder()
         .method("POST")
-        .uri("/memories/read")
+        .uri("/v1/memories/read")
         .header("content-type", "application/json")
         .body(Body::from(format!(
             r#"{{
                 "username":"alice",
                 "agent_id":"{agent_id}",
-                "memory_type":"daily_note",
                 "filename":"test.md"
             }}"#
         )))
@@ -725,13 +694,12 @@ async fn search_after_write_returns_results() {
 
     let req = Request::builder()
         .method("POST")
-        .uri("/memories/write")
+        .uri("/v1/memories/write")
         .header("content-type", "application/json")
         .body(Body::from(format!(
             r#"{{
                 "username":"alice",
                 "agent_id":"{agent_id}",
-                "memory_type":"daily_note",
                 "filename":"notes.md",
                 "content":"Rust programming language is great"
             }}"#
@@ -742,7 +710,7 @@ async fn search_after_write_returns_results() {
 
     let req = Request::builder()
         .method("POST")
-        .uri("/search")
+        .uri("/v1/search")
         .header("content-type", "application/json")
         .body(Body::from(format!(
             r#"{{
@@ -767,7 +735,7 @@ async fn bad_json_returns_400() {
 
     let req = Request::builder()
         .method("POST")
-        .uri("/memories/write")
+        .uri("/v1/memories/write")
         .header("content-type", "application/json")
         .body(Body::from("{not valid json}"))
         .unwrap();
@@ -1006,11 +974,11 @@ Expected: PASS.
 - [ ] **Step 3: Smoke test**
 
 Run (in background): `cargo run`
-In another shell: `curl -s http://127.0.0.1:8080/health`
+In another shell: `curl -s http://127.0.0.1:8080/v1/health`
 Expected: `{"status":"ok"}`
 Then stop the server with Ctrl-C.
 
-(If running on Windows PowerShell, use `Invoke-RestMethod http://127.0.0.1:8080/health` or `curl.exe`.)
+(If running on Windows PowerShell, use `Invoke-RestMethod http://127.0.0.1:8080/v1/health` or `curl.exe`.)
 
 - [ ] **Step 4: Commit**
 

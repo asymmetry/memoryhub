@@ -372,10 +372,10 @@ mod tests {
     #[test]
     fn storage_write_msg_fields() {
         let msg = StorageWrite {
-            rel_path: "alice/agent1/daily_note/2026-03-31.md".to_string(),
+            rel_path: "alice/agent1/2026-03-31.md".to_string(),
             content: "hello".to_string(),
         };
-        assert_eq!(msg.rel_path, "alice/agent1/daily_note/2026-03-31.md");
+        assert_eq!(msg.rel_path, "alice/agent1/2026-03-31.md");
         assert_eq!(msg.content, "hello");
     }
 
@@ -384,7 +384,6 @@ mod tests {
         let msg = FileOpWrite {
             username: "alice".to_string(),
             agent_id: Uuid::new_v4(),
-            memory_type: crate::memory::MemoryType::DailyNote,
             filename: "2026-03-31.md".to_string(),
             content: "hello".to_string(),
         };
@@ -394,7 +393,7 @@ mod tests {
     #[test]
     fn search_result_fields() {
         let sr = SearchResult {
-            path: "alice/agent1/daily_note/2026-03-31.md".to_string(),
+            path: "alice/agent1/2026-03-31.md".to_string(),
             start_line: 1,
             end_line: 10,
             score: 0.95,
@@ -436,7 +435,6 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::embedding::Embedding;
-use crate::memory::MemoryType;
 
 // ---------------------------------------------------------------------------
 // Shared types
@@ -549,7 +547,6 @@ impl Message for IndexSearch {
 pub struct FileOpWrite {
     pub username: String,
     pub agent_id: Uuid,
-    pub memory_type: MemoryType,
     pub filename: String,
     pub content: String,
 }
@@ -563,7 +560,6 @@ impl Message for FileOpWrite {
 pub struct FileOpRead {
     pub username: String,
     pub agent_id: Uuid,
-    pub memory_type: MemoryType,
     pub filename: String,
 }
 
@@ -576,7 +572,6 @@ impl Message for FileOpRead {
 pub struct FileOpDelete {
     pub username: String,
     pub agent_id: Uuid,
-    pub memory_type: MemoryType,
     pub filename: String,
 }
 
@@ -779,26 +774,35 @@ pub fn chunk_text(content: &str, chunk_size: usize, chunk_overlap: usize) -> Vec
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::memory::MemoryType;
     use uuid::Uuid;
 
     #[test]
-    fn daily_note_path() {
+    fn simple_filename_path() {
         let agent_id = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440000").unwrap();
-        let path = derive_rel_path("alice", agent_id, MemoryType::DailyNote, "2026-03-31.md");
+        let path = derive_rel_path("alice", agent_id, "2026-03-31.md");
         assert_eq!(
             path,
-            "alice/550e8400-e29b-41d4-a716-446655440000/daily_note/2026-03-31.md"
+            "alice/550e8400-e29b-41d4-a716-446655440000/2026-03-31.md"
         );
     }
 
     #[test]
-    fn long_term_path() {
+    fn filename_with_forward_slash_is_flattened() {
         let agent_id = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440000").unwrap();
-        let path = derive_rel_path("bob", agent_id, MemoryType::LongTerm, "MEMORY.md");
+        let path = derive_rel_path("alice", agent_id, "notes/2026-03-31.md");
         assert_eq!(
             path,
-            "bob/550e8400-e29b-41d4-a716-446655440000/long_term/MEMORY.md"
+            "alice/550e8400-e29b-41d4-a716-446655440000/notes_2026-03-31.md"
+        );
+    }
+
+    #[test]
+    fn filename_with_backslash_is_flattened() {
+        let agent_id = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440000").unwrap();
+        let path = derive_rel_path("alice", agent_id, "notes\\2026-03-31.md");
+        assert_eq!(
+            path,
+            "alice/550e8400-e29b-41d4-a716-446655440000/notes_2026-03-31.md"
         );
     }
 }
@@ -813,24 +817,16 @@ mod tests {
 ```rust
 //! Path derivation utilities for the Memory Manager.
 //!
-//! Layout: `{username}/{agent_id}/{memory_type}/{filename}`
+//! Layout: `{username}/{agent_id}/{filename}`. Any `/` or `\` in `filename`
+//! is flattened to `_` so the result is always a single path segment under
+//! the user/agent directory.
 
 use uuid::Uuid;
 
-use crate::memory::MemoryType;
-
 /// Derive the relative filesystem path for a memory file.
-pub fn derive_rel_path(
-    username: &str,
-    agent_id: Uuid,
-    memory_type: MemoryType,
-    filename: &str,
-) -> String {
-    let type_dir = match memory_type {
-        MemoryType::DailyNote => "daily_note",
-        MemoryType::LongTerm => "long_term",
-    };
-    format!("{}/{}/{}/{}", username, agent_id, type_dir, filename)
+pub fn derive_rel_path(username: &str, agent_id: Uuid, filename: &str) -> String {
+    let flat = filename.replace(['/', '\\'], "_");
+    format!("{}/{}/{}", username, agent_id, flat)
 }
 ```
 
@@ -867,7 +863,7 @@ mod tests {
         let (addr, _handle) = store.run("storage-test").unwrap();
 
         addr.send(StorageWrite {
-            rel_path: "alice/agent1/daily_note/2026-03-31.md".to_string(),
+            rel_path: "alice/agent1/2026-03-31.md".to_string(),
             content: "Hello world".to_string(),
         })
         .await
@@ -878,7 +874,7 @@ mod tests {
 
         let content = addr
             .send(StorageRead {
-                rel_path: "alice/agent1/daily_note/2026-03-31.md".to_string(),
+                rel_path: "alice/agent1/2026-03-31.md".to_string(),
             })
             .await
             .unwrap()
@@ -1139,7 +1135,7 @@ mod tests {
         let (addr, _handle) = index.run("index-test").unwrap();
 
         addr.send(IndexInsert {
-            path: "alice/agent1/daily_note/2026-03-31.md".to_string(),
+            path: "alice/agent1/2026-03-31.md".to_string(),
             source: "raw".to_string(),
             size: 100,
             model: "mock".to_string(),
@@ -1170,7 +1166,7 @@ mod tests {
             .unwrap();
 
         assert!(!results.is_empty());
-        assert_eq!(results[0].path, "alice/agent1/daily_note/2026-03-31.md");
+        assert_eq!(results[0].path, "alice/agent1/2026-03-31.md");
     }
 
     #[tokio::test]
@@ -1179,7 +1175,7 @@ mod tests {
         let (addr, _handle) = index.run("index-test").unwrap();
 
         addr.send(IndexInsert {
-            path: "alice/agent1/daily_note/temp.md".to_string(),
+            path: "alice/agent1/temp.md".to_string(),
             source: "raw".to_string(),
             size: 50,
             model: "mock".to_string(),
@@ -1197,7 +1193,7 @@ mod tests {
         .unwrap();
 
         addr.send(IndexDelete {
-            path: "alice/agent1/daily_note/temp.md".to_string(),
+            path: "alice/agent1/temp.md".to_string(),
         })
         .await
         .unwrap()
@@ -1226,7 +1222,7 @@ mod tests {
         let index = test_index();
         let (addr, _handle) = index.run("index-test").unwrap();
 
-        let path = "alice/agent1/daily_note/replace.md".to_string();
+        let path = "alice/agent1/replace.md".to_string();
 
         addr.send(IndexInsert {
             path: path.clone(),
@@ -1636,7 +1632,6 @@ mod tests {
     use super::*;
     use crate::embedding::MockEmbeddingService;
     use crate::memory::messages::{FileOpDelete, FileOpRead, FileOpWrite, SearchQuery};
-    use crate::memory::MemoryType;
     use std::sync::Arc;
     use uuid::Uuid;
 
@@ -1663,7 +1658,6 @@ mod tests {
         addr.send(FileOpWrite {
             username: "alice".to_string(),
             agent_id,
-            memory_type: MemoryType::DailyNote,
             filename: "test.md".to_string(),
             content: "Hello from test".to_string(),
         })
@@ -1678,7 +1672,6 @@ mod tests {
             .send(FileOpRead {
                 username: "alice".to_string(),
                 agent_id,
-                memory_type: MemoryType::DailyNote,
                 filename: "test.md".to_string(),
             })
             .await
@@ -1692,7 +1685,6 @@ mod tests {
         addr.send(FileOpDelete {
             username: "alice".to_string(),
             agent_id,
-            memory_type: MemoryType::DailyNote,
             filename: "test.md".to_string(),
         })
         .await
@@ -1706,7 +1698,6 @@ mod tests {
             .send(FileOpRead {
                 username: "alice".to_string(),
                 agent_id,
-                memory_type: MemoryType::DailyNote,
                 filename: "test.md".to_string(),
             })
             .await
@@ -1739,7 +1730,6 @@ mod tests {
         addr.send(FileOpWrite {
             username: "alice".to_string(),
             agent_id,
-            memory_type: MemoryType::DailyNote,
             filename: "notes.md".to_string(),
             content: "Rust programming language is great".to_string(),
         })
@@ -1855,7 +1845,7 @@ impl<E: EmbeddingService + 'static> Handler<FileOpWrite> for MemoryManager<E> {
     type Result = Result<()>;
 
     async fn handle(&mut self, msg: FileOpWrite, _ctx: &mut Self::Context) -> Result<()> {
-        let rel_path = derive_rel_path(&msg.username, msg.agent_id, msg.memory_type, &msg.filename);
+        let rel_path = derive_rel_path(&msg.username, msg.agent_id, &msg.filename);
         debug!(rel_path = %rel_path, "MemoryManager: write");
 
         // 1. Write to Storage.
@@ -1924,7 +1914,7 @@ impl<E: EmbeddingService + 'static> Handler<FileOpRead> for MemoryManager<E> {
     type Result = Result<Option<String>>;
 
     async fn handle(&mut self, msg: FileOpRead, _ctx: &mut Self::Context) -> Result<Option<String>> {
-        let rel_path = derive_rel_path(&msg.username, msg.agent_id, msg.memory_type, &msg.filename);
+        let rel_path = derive_rel_path(&msg.username, msg.agent_id, &msg.filename);
         debug!(rel_path = %rel_path, "MemoryManager: read");
 
         let content = self
@@ -1941,7 +1931,7 @@ impl<E: EmbeddingService + 'static> Handler<FileOpDelete> for MemoryManager<E> {
     type Result = Result<()>;
 
     async fn handle(&mut self, msg: FileOpDelete, _ctx: &mut Self::Context) -> Result<()> {
-        let rel_path = derive_rel_path(&msg.username, msg.agent_id, msg.memory_type, &msg.filename);
+        let rel_path = derive_rel_path(&msg.username, msg.agent_id, &msg.filename);
         debug!(rel_path = %rel_path, "MemoryManager: delete");
 
         // Delete from Index first.
@@ -2025,7 +2015,7 @@ pub mod path;
 pub mod sqlite;
 ```
 
-- [ ] Remove the `MemoryManager` trait (lines 131-157 of current `src/memory.rs`). Keep all domain types (`MemoryType`, `MemoryOrigin`, `RawMemory`, `SynthesizedMemory`, `MemoryEntry`).
+- [ ] Remove the `MemoryManager` trait (lines 131-157 of current `src/memory.rs`) **and** the `MemoryType` enum — the memory manager no longer has a notion of memory categories. Keep the remaining domain types (`MemoryOrigin`, `RawMemory`, `SynthesizedMemory`, `MemoryEntry`) and drop any of their fields that referenced `MemoryType`.
 
 - [ ] Run `rtk cargo test` — expect all tests pass.
 
@@ -2252,66 +2242,178 @@ git commit -m "feat(config): add session idle timeout to LlmConfig"
 
 ---
 
-## Task 14: Add `FileChanged` and synthesis path helper
+## Task 14: Add `FileChanged` and synthesis path helpers
 
 **Files:**
 - Modify: `src/memory/messages.rs`
 - Modify: `src/memory/path.rs`
+- Modify: `src/memory/config.rs` (add `max_file_bytes`)
 
-- [ ] **Step 1: Add a failing test for synthesis path derivation**
+The synthesizer no longer writes to a single `summary.md`; it writes to UTC date-named files under `_synthesized/`, rolling over to suffixed names when a size cap is reached. See [Synthesized output files](../specs/memory-manager-design.md#synthesized-output-files) in the design spec for the full naming rules.
+
+- [ ] **Step 1: Add a `SynthesisTarget` enum and failing tests for the path helpers**
 
 Append to `mod tests` in `src/memory/path.rs`:
 
 ```rust
 #[test]
-fn per_user_synthesis_path() {
-    let path = derive_synthesis_path(Some("alice"), MemoryType::DailyNote, "2026-05-13.md");
-    assert_eq!(path, "alice/_synthesized/daily_note/2026-05-13.md");
+fn per_user_synthesis_path_uses_date_name() {
+    let dir = tempfile::tempdir().unwrap();
+    let today = chrono::NaiveDate::from_ymd_opt(2026, 5, 20).unwrap();
+    let path = current_synthesis_path(
+        dir.path(),
+        SynthesisTarget::User("alice".to_string()),
+        today,
+        1024 * 1024,
+    );
+    assert_eq!(path, "alice/_synthesized/2026-05-20.md");
 }
 
 #[test]
-fn cross_user_synthesis_path() {
-    let path = derive_synthesis_path(None, MemoryType::LongTerm, "merged.md");
-    assert_eq!(path, "_synthesized/long_term/merged.md");
+fn global_synthesis_path_uses_date_name() {
+    let dir = tempfile::tempdir().unwrap();
+    let today = chrono::NaiveDate::from_ymd_opt(2026, 5, 20).unwrap();
+    let path = current_synthesis_path(dir.path(), SynthesisTarget::Global, today, 1024 * 1024);
+    assert_eq!(path, "_synthesized/2026-05-20.md");
+}
+
+#[test]
+fn synthesis_path_rolls_over_when_current_at_cap() {
+    let dir = tempfile::tempdir().unwrap();
+    let synth_dir = dir.path().join("alice").join("_synthesized");
+    std::fs::create_dir_all(&synth_dir).unwrap();
+    std::fs::write(synth_dir.join("2026-05-20.md"), vec![0u8; 1024]).unwrap();
+
+    let today = chrono::NaiveDate::from_ymd_opt(2026, 5, 20).unwrap();
+    let path = current_synthesis_path(
+        dir.path(),
+        SynthesisTarget::User("alice".to_string()),
+        today,
+        512, // cap below existing file size
+    );
+    assert_eq!(path, "alice/_synthesized/2026-05-20-1.md");
+}
+
+#[test]
+fn latest_synthesis_path_picks_lexicographic_max() {
+    let dir = tempfile::tempdir().unwrap();
+    let synth_dir = dir.path().join("alice").join("_synthesized");
+    std::fs::create_dir_all(&synth_dir).unwrap();
+    std::fs::write(synth_dir.join("2026-05-19.md"), b"").unwrap();
+    std::fs::write(synth_dir.join("2026-05-20.md"), b"").unwrap();
+    std::fs::write(synth_dir.join("2026-05-20-1.md"), b"").unwrap();
+
+    let latest = latest_synthesis_path(dir.path(), SynthesisTarget::User("alice".to_string()));
+    assert_eq!(latest.as_deref(), Some("alice/_synthesized/2026-05-20-1.md"));
 }
 ```
 
 - [ ] **Step 2: Run the tests and confirm they fail**
 
 Run: `rtk cargo test --lib memory::path`
-Expected: compile error — `derive_synthesis_path` not found.
+Expected: compile error — helpers and `SynthesisTarget` not found.
 
-- [ ] **Step 3: Add `derive_synthesis_path`**
+- [ ] **Step 3: Add `SynthesisTarget` plus the two helpers**
 
 Append to `src/memory/path.rs` (above `#[cfg(test)]`):
 
 ```rust
-/// Derive the relative filesystem path for a synthesized memory file.
-///
-/// `username = Some(...)` → `{username}/_synthesized/{memory_type}/{filename}`
-/// `username = None`       → `_synthesized/{memory_type}/{filename}`
-pub fn derive_synthesis_path(
-    username: Option<&str>,
-    memory_type: MemoryType,
-    filename: &str,
-) -> String {
-    let type_dir = match memory_type {
-        MemoryType::DailyNote => "daily_note",
-        MemoryType::LongTerm => "long_term",
-    };
-    match username {
-        Some(u) => format!("{}/_synthesized/{}/{}", u, type_dir, filename),
-        None => format!("_synthesized/{}/{}", type_dir, filename),
+use std::path::Path;
+
+use chrono::NaiveDate;
+
+/// Which level of the `_synthesized/` tree a synthesizer write targets.
+#[derive(Debug, Clone)]
+pub enum SynthesisTarget {
+    /// Per-user synthesis at `{memory_dir}/{username}/_synthesized/…`.
+    User(String),
+    /// Cross-user (global) synthesis at `{memory_dir}/_synthesized/…`.
+    Global,
+}
+
+impl SynthesisTarget {
+    fn rel_dir(&self) -> String {
+        match self {
+            SynthesisTarget::User(u) => format!("{}/_synthesized", u),
+            SynthesisTarget::Global => "_synthesized".to_string(),
+        }
     }
+}
+
+/// Returns the relative path the synthesizer should *write* to next for the
+/// given target. Picks the current dated file (`{today}.md` or the lex-greatest
+/// `{today}[-{n}].md`) and rolls over to the next suffixed name when reusing it
+/// would exceed `max_file_bytes`.
+pub fn current_synthesis_path(
+    memory_dir: &Path,
+    target: SynthesisTarget,
+    today: NaiveDate,
+    max_file_bytes: u64,
+) -> String {
+    let rel_dir = target.rel_dir();
+    let abs_dir = memory_dir.join(&rel_dir);
+    let today_str = today.format("%Y-%m-%d").to_string();
+
+    // Find the lex-greatest existing `{today}[-{n}].md` (if any).
+    let mut best: Option<(String, u64)> = None;
+    if let Ok(rd) = std::fs::read_dir(&abs_dir) {
+        for entry in rd.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if !name.starts_with(&today_str) || !name.ends_with(".md") {
+                continue;
+            }
+            let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
+            match &best {
+                Some((bn, _)) if name.as_str() <= bn.as_str() => {}
+                _ => best = Some((name, size)),
+            }
+        }
+    }
+
+    match best {
+        None => format!("{}/{}.md", rel_dir, today_str),
+        Some((name, size)) if size < max_file_bytes => format!("{}/{}", rel_dir, name),
+        Some((name, _)) => {
+            // Roll over: bump the trailing `-{n}` (or add `-1`).
+            let stem = name.trim_end_matches(".md");
+            let next_n = match stem.strip_prefix(&today_str).and_then(|s| s.strip_prefix('-')) {
+                Some(num) => num.parse::<u32>().unwrap_or(0) + 1,
+                None => 1,
+            };
+            format!("{}/{}-{}.md", rel_dir, today_str, next_n)
+        }
+    }
+}
+
+/// Returns the relative path of the most recently written synthesized file for
+/// the target (lex-greatest filename in the folder), to be passed as
+/// `prior_summary`. Returns `None` if no synthesized file exists yet.
+pub fn latest_synthesis_path(memory_dir: &Path, target: SynthesisTarget) -> Option<String> {
+    let rel_dir = target.rel_dir();
+    let abs_dir = memory_dir.join(&rel_dir);
+    let mut best: Option<String> = None;
+    for entry in std::fs::read_dir(&abs_dir).ok()?.flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        if !name.ends_with(".md") {
+            continue;
+        }
+        match &best {
+            Some(b) if name.as_str() <= b.as_str() => {}
+            _ => best = Some(name),
+        }
+    }
+    best.map(|n| format!("{}/{}", rel_dir, n))
 }
 ```
 
-- [ ] **Step 4: Run the tests and confirm they pass**
+- [ ] **Step 4: Add `synthesis.max_file_bytes` to `MemoryConfig`** (default `1024 * 1024`, 1 MiB) and a corresponding default test in `src/memory/config.rs`. The synthesizer will read this when calling `current_synthesis_path`.
+
+- [ ] **Step 5: Run the tests and confirm they pass**
 
 Run: `rtk cargo test --lib memory::path`
-Expected: all 4 tests pass.
+Expected: all path tests pass.
 
-- [ ] **Step 5: Add the `FileChanged` message**
+- [ ] **Step 6: Add the `FileChanged` message**
 
 Append to `src/memory/messages.rs` (after the FileOp messages, before tests):
 
@@ -2335,24 +2437,24 @@ Then add a test inside `mod tests`:
 #[test]
 fn file_changed_msg_fields() {
     let msg = FileChanged {
-        rel_path: "alice/agent1/daily_note/x.md".to_string(),
+        rel_path: "alice/agent1/x.md".to_string(),
     };
-    assert_eq!(msg.rel_path, "alice/agent1/daily_note/x.md");
+    assert_eq!(msg.rel_path, "alice/agent1/x.md");
 }
 ```
 
-- [ ] **Step 6: Run the tests and confirm they pass**
+- [ ] **Step 7: Run the tests and confirm they pass**
 
 Run: `rtk cargo test --lib memory::messages`
 Expected: pass.
 
-- [ ] **Step 7: Run `rtk cargo fmt`**
+- [ ] **Step 8: Run `rtk cargo fmt`**
 
-- [ ] **Step 8: Commit**
+- [ ] **Step 9: Commit**
 
 ```bash
-git add src/memory/path.rs src/memory/messages.rs
-git commit -m "feat(memory): add synthesis path helper and FileChanged message"
+git add src/memory/path.rs src/memory/messages.rs src/memory/config.rs
+git commit -m "feat(memory): add synthesis path helpers, max_file_bytes config, and FileChanged message"
 ```
 
 ---
@@ -2602,13 +2704,14 @@ use tracing::{error, info, trace, warn};
 
 use crate::llm::session::{SendMessage, StopSession};
 use crate::llm::{Embed, LlmService, StartSession};
+use std::path::PathBuf;
+
 use crate::memory::{
-    MemoryType,
     chunking::chunk_text,
     error::MemoryError,
     index::Index,
     messages::{Chunk, EnsureVecReady, FileChanged, IndexInsert, StorageRead, StorageWrite},
-    path::derive_synthesis_path,
+    path::{current_synthesis_path, SynthesisTarget},
     storage::Storage,
 };
 
@@ -2621,9 +2724,11 @@ pub struct Synthesizer {
     storage: Address<Storage>,
     index: Address<Index>,
     llm: Address<LlmService>,
+    memory_dir: PathBuf,
     cooldown: Duration,
     chunk_size: usize,
     chunk_overlap: usize,
+    max_file_bytes: u64,
     pending: BTreeSet<String>,
     last_event: Option<Instant>,
 }
@@ -2633,17 +2738,21 @@ impl Synthesizer {
         storage: Address<Storage>,
         index: Address<Index>,
         llm: Address<LlmService>,
+        memory_dir: PathBuf,
         cooldown_secs: u64,
         chunk_size: usize,
         chunk_overlap: usize,
+        max_file_bytes: u64,
     ) -> Self {
         Self {
             storage,
             index,
             llm,
+            memory_dir,
             cooldown: Duration::from_secs(cooldown_secs),
             chunk_size,
             chunk_overlap,
+            max_file_bytes,
             pending: BTreeSet::new(),
             last_event: None,
         }
@@ -2721,12 +2830,13 @@ impl Synthesizer {
             })
             .collect();
 
-        let common_user = common_username(&sources);
-        let synth_path = derive_synthesis_path(
-            common_user.as_deref(),
-            MemoryType::LongTerm,
-            &synthesis_filename(),
-        );
+        let target = match common_username(&sources) {
+            Some(u) => SynthesisTarget::User(u),
+            None => SynthesisTarget::Global,
+        };
+        let today = chrono::Utc::now().date_naive();
+        let synth_path =
+            current_synthesis_path(&self.memory_dir, target, today, self.max_file_bytes);
 
         if let Err(e) = self
             .storage
@@ -2789,10 +2899,6 @@ fn common_username(sources: &[(String, String)]) -> Option<String> {
         }
     }
     Some(first)
-}
-
-fn synthesis_filename() -> String {
-    format!("synthesis-{}.md", chrono::Utc::now().timestamp())
 }
 
 impl Actor for Synthesizer {
@@ -2863,7 +2969,7 @@ mod tests {
 
         storage
             .send(StorageWrite {
-                path: "alice/agent1/daily_note/x.md".to_string(),
+                path: "alice/agent1/x.md".to_string(),
                 content: "hello world".to_string(),
             })
             .await
@@ -2872,10 +2978,19 @@ mod tests {
             .unwrap()
             .unwrap();
 
-        let synth = Synthesizer::new(storage.clone(), index, llm, 0, 400, 80);
+        let synth = Synthesizer::new(
+            storage.clone(),
+            index,
+            llm,
+            _dir.path().to_path_buf(),
+            0,
+            400,
+            80,
+            1024 * 1024,
+        );
         let (addr, _handle) = synth.start("synth").unwrap();
 
-        addr.send(FileChanged { rel_path: "alice/agent1/daily_note/x.md".to_string() })
+        addr.send(FileChanged { rel_path: "alice/agent1/x.md".to_string() })
             .await
             .unwrap()
             .await
@@ -2883,7 +2998,9 @@ mod tests {
 
         tokio::time::sleep(Duration::from_millis(200)).await;
 
-        let target_dir = _dir.path().join("alice").join("_synthesized").join("long_term");
+        // Per the path helpers, output is a date-named file directly under
+        // `{memory_dir}/alice/_synthesized/`.
+        let target_dir = _dir.path().join("alice").join("_synthesized");
         let entries: Vec<_> = std::fs::read_dir(&target_dir)
             .map(|rd| rd.filter_map(|e| e.ok()).collect())
             .unwrap_or_default();
@@ -2893,8 +3010,8 @@ mod tests {
     #[test]
     fn common_username_detects_single_owner() {
         let sources = vec![
-            ("alice/a/daily_note/x.md".to_string(), String::new()),
-            ("alice/b/long_term/y.md".to_string(), String::new()),
+            ("alice/a/x.md".to_string(), String::new()),
+            ("alice/b/y.md".to_string(), String::new()),
         ];
         assert_eq!(common_username(&sources).as_deref(), Some("alice"));
     }
@@ -2902,8 +3019,8 @@ mod tests {
     #[test]
     fn common_username_returns_none_for_mixed_owners() {
         let sources = vec![
-            ("alice/a/daily_note/x.md".to_string(), String::new()),
-            ("bob/b/long_term/y.md".to_string(), String::new()),
+            ("alice/a/x.md".to_string(), String::new()),
+            ("bob/b/y.md".to_string(), String::new()),
         ];
         assert!(common_username(&sources).is_none());
     }
@@ -2960,7 +3077,6 @@ async fn write_emits_synthesis_after_cooldown() {
     addr.send(FileOpWrite {
         username: "alice".to_string(),
         agent_id,
-        memory_type: MemoryType::DailyNote,
         filename: "first.md".to_string(),
         content: "Some content for synthesis".to_string(),
     })
@@ -2972,7 +3088,7 @@ async fn write_emits_synthesis_after_cooldown() {
 
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
 
-    let synth_dir = dir.path().join("alice").join("_synthesized").join("long_term");
+    let synth_dir = dir.path().join("alice").join("_synthesized");
     let entries: Vec<_> = std::fs::read_dir(&synth_dir)
         .map(|rd| rd.filter_map(|e| e.ok()).collect())
         .unwrap_or_default();
@@ -3036,9 +3152,11 @@ In `MemoryManager::new`, after the Index actor is started:
             storage_addr.clone(),
             index_addr.clone(),
             llm.clone(),
+            config.memory_dir_resolved(),
             config.synthesizer_cooldown_secs,
             config.chunk_size,
             config.chunk_overlap,
+            config.max_file_bytes,
         );
         let (synthesizer_addr, synthesizer_handle) = synthesizer.start("synthesizer")?;
 ```

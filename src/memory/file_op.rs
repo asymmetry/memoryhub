@@ -1,49 +1,47 @@
-//! FileOp Actor — short-lived per-request actor for write/read/delete pipelines.
+//! File operation actors.
 //!
-//! Spawned by the Memory Manager for each incoming FileOp message.
-//! Coordinates between Storage, Index, and the LLM Service,
-//! then terminates.
+//! Spawned by the Memory Manager for each incoming FileOp message. Coordinates between Storage,
+//! Index, and the LLM Service, then terminates.
 
-use acktor::{Actor, Address, Context, Handler};
-use tracing::{error, trace, warn};
+use acktor::{Actor, Address, Context, ErrorReport, Handler, utils::debug_trace};
+use tracing::{error, warn};
 
-use crate::llm::{Embed, LlmService};
-use crate::memory::{
-    chunking::chunk_text,
-    error::MemoryError,
-    index::Index,
-    messages::{
-        Chunk, EnsureVecReady, FileChanged, FileOpDelete, FileOpRead, FileOpWrite, IndexDelete,
-        IndexInsert, StorageDelete, StorageRead, StorageWrite,
-    },
-    path::derive_rel_path,
-    storage::Storage,
-    synthesizer::Synthesizer,
+use super::chunking::chunk_text;
+use super::error::MemoryError;
+use super::index::Index;
+use super::message::{
+    Chunk, EnsureVecReady, FileChanged, FileOpDelete, FileOpRead, FileOpWrite, IndexDelete,
+    IndexInsert, StorageDelete, StorageRead, StorageWrite,
 };
+use super::path::get_raw_path;
+use super::storage::Storage;
+use super::synthesizer::Synthesizer;
+use crate::llm::{Embed, LlmService};
 
 /// A short-lived actor that handles a single FileOp request.
 pub struct FileOp {
+    llm: Address<LlmService>,
     storage: Address<Storage>,
     index: Address<Index>,
-    llm: Address<LlmService>,
     synthesizer: Address<Synthesizer>,
     chunk_size: usize,
     chunk_overlap: usize,
 }
 
 impl FileOp {
+    /// Constructs a new `FileOp` actor.
     pub fn new(
+        llm: Address<LlmService>,
         storage: Address<Storage>,
         index: Address<Index>,
-        llm: Address<LlmService>,
         synthesizer: Address<Synthesizer>,
         chunk_size: usize,
         chunk_overlap: usize,
     ) -> Self {
         Self {
+            llm,
             storage,
             index,
-            llm,
             synthesizer,
             chunk_size,
             chunk_overlap,
@@ -64,19 +62,18 @@ impl Handler<FileOpWrite> for FileOp {
         msg: FileOpWrite,
         _ctx: &mut Self::Context,
     ) -> Result<(), MemoryError> {
-        trace!("Handle command {:?}", msg);
-        let rel_path = derive_rel_path(&msg.username, msg.agent_id, msg.memory_type, &msg.filename);
+        debug_trace!("Handle command {:?}", msg);
+
+        let storage_path = get_raw_path(&msg.username, msg.agent_id, &msg.filename);
 
         // 1. Write to Storage.
         self.storage
             .send(StorageWrite {
-                path: rel_path.clone(),
+                path: storage_path.clone(),
                 content: msg.content.clone(),
             })
-            .await
-            .map_err(|e| MemoryError::Actor(e.to_string()))?
-            .await
-            .map_err(|e| MemoryError::Actor(e.to_string()))??;
+            .await?
+            .await??;
 
         // 2. Chunk.
         let text_chunks = chunk_text(&msg.content, self.chunk_size, self.chunk_overlap);
@@ -86,14 +83,7 @@ impl Handler<FileOpWrite> for FileOp {
         let embed_result = if texts.is_empty() {
             None
         } else {
-            Some(
-                self.llm
-                    .send(Embed { texts })
-                    .await
-                    .map_err(|e| MemoryError::Actor(e.to_string()))?
-                    .await
-                    .map_err(|e| MemoryError::Actor(e.to_string()))??,
-            )
+            Some(self.llm.send(Embed { texts }).await?.await??)
         };
 
         let (model, embeddings) = match embed_result {
@@ -116,38 +106,36 @@ impl Handler<FileOpWrite> for FileOp {
         // 5. Ensure the vec table exists for this embedding dimension.
         if let Some(first) = chunks.first() {
             let dim = first.embedding.0.len();
-            self.index
-                .send(EnsureVecReady { dim })
-                .await
-                .map_err(|e| MemoryError::Actor(e.to_string()))?
-                .await
-                .map_err(|e| MemoryError::Actor(e.to_string()))??;
+            self.index.send(EnsureVecReady { dim }).await?.await??;
         }
 
         // 6. Insert into Index.
         let result = self
             .index
             .send(IndexInsert {
-                path: rel_path.clone(),
+                path: storage_path.clone(),
                 source: "raw".to_string(),
                 size: msg.content.len() as u64,
                 model,
                 chunks,
             })
-            .await
-            .map_err(|e| MemoryError::Actor(e.to_string()))?
-            .await
-            .map_err(|e| MemoryError::Actor(e.to_string()))?;
+            .await?
+            .await?;
 
         // 7. Rollback on failure.
         if let Err(e) = result {
-            error!(rel_path = %rel_path, error = %e, "FileOp: index insert failed, rolling back");
+            error!(
+                "Index insert for {storage_path} failed ({}); rolling back the storage write",
+                e.report()
+            );
+
             let _ = self
                 .storage
-                .send(StorageDelete {
-                    path: rel_path.clone(),
+                .do_send(StorageDelete {
+                    path: storage_path.clone(),
                 })
                 .await;
+
             return Err(e.into());
         }
 
@@ -155,11 +143,14 @@ impl Handler<FileOpWrite> for FileOp {
         if let Err(e) = self
             .synthesizer
             .do_send(FileChanged {
-                rel_path: rel_path.clone(),
+                rel_path: storage_path.clone(),
             })
             .await
         {
-            warn!(rel_path = %rel_path, error = %e, "FileOp: synthesizer notify failed");
+            warn!(
+                "Failed to notify the synthesizer about {storage_path}: {}",
+                e.report()
+            );
         }
 
         Ok(())
@@ -174,16 +165,15 @@ impl Handler<FileOpRead> for FileOp {
         msg: FileOpRead,
         _ctx: &mut Self::Context,
     ) -> Result<Option<String>, MemoryError> {
-        trace!("Handle command {:?}", msg);
-        let rel_path = derive_rel_path(&msg.username, msg.agent_id, msg.memory_type, &msg.filename);
+        debug_trace!("Handle command {:?}", msg);
+
+        let storage_path = get_raw_path(&msg.username, msg.agent_id, &msg.filename);
 
         let content = self
             .storage
-            .send(StorageRead { path: rel_path })
-            .await
-            .map_err(|e| MemoryError::Actor(e.to_string()))?
-            .await
-            .map_err(|e| MemoryError::Actor(e.to_string()))??;
+            .send(StorageRead { path: storage_path })
+            .await?
+            .await??;
 
         Ok(content)
     }
@@ -197,26 +187,40 @@ impl Handler<FileOpDelete> for FileOp {
         msg: FileOpDelete,
         _ctx: &mut Self::Context,
     ) -> Result<(), MemoryError> {
-        trace!("Handle command {:?}", msg);
-        let rel_path = derive_rel_path(&msg.username, msg.agent_id, msg.memory_type, &msg.filename);
+        debug_trace!("Handle command {:?}", msg);
+
+        let storage_path = get_raw_path(&msg.username, msg.agent_id, &msg.filename);
 
         // Delete from Index first.
         self.index
             .send(IndexDelete {
-                path: rel_path.clone(),
+                path: storage_path.clone(),
             })
-            .await
-            .map_err(|e| MemoryError::Actor(e.to_string()))?
-            .await
-            .map_err(|e| MemoryError::Actor(e.to_string()))??;
+            .await?
+            .await??;
 
         // Then delete from Storage.
         self.storage
-            .send(StorageDelete { path: rel_path })
+            .send(StorageDelete {
+                path: storage_path.clone(),
+            })
+            .await?
+            .await??;
+
+        // Notify the Synthesizer so it can refresh the running summary
+        // without the deleted source.
+        if let Err(e) = self
+            .synthesizer
+            .do_send(FileChanged {
+                rel_path: storage_path.clone(),
+            })
             .await
-            .map_err(|e| MemoryError::Actor(e.to_string()))?
-            .await
-            .map_err(|e| MemoryError::Actor(e.to_string()))??;
+        {
+            warn!(
+                "Failed to notify the synthesizer about {storage_path}: {}",
+                e.report()
+            );
+        }
 
         Ok(())
     }

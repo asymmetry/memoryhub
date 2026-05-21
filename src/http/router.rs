@@ -9,10 +9,7 @@ use uuid::Uuid;
 
 use super::HttpServerState;
 use super::error::HttpError;
-use crate::memory::{
-    MemoryType,
-    messages::{FileOpDelete, FileOpRead, FileOpWrite, Search, SearchResult},
-};
+use crate::memory::message::{FileOpDelete, FileOpRead, FileOpWrite, Search, SearchResult};
 
 pub fn build_router(state: HttpServerState) -> Router {
     let v1 = Router::new()
@@ -31,7 +28,6 @@ pub fn build_router(state: HttpServerState) -> Router {
 pub struct WriteRequest {
     pub username: String,
     pub agent_id: Uuid,
-    pub memory_type: MemoryType,
     pub filename: String,
     pub content: String,
 }
@@ -40,7 +36,6 @@ pub struct WriteRequest {
 pub struct ReadRequest {
     pub username: String,
     pub agent_id: Uuid,
-    pub memory_type: MemoryType,
     pub filename: String,
 }
 
@@ -53,7 +48,6 @@ pub struct ReadResponse {
 pub struct DeleteRequest {
     pub username: String,
     pub agent_id: Uuid,
-    pub memory_type: MemoryType,
     pub filename: String,
 }
 
@@ -85,7 +79,6 @@ pub async fn write(
     let msg = FileOpWrite {
         username: req.username,
         agent_id: req.agent_id,
-        memory_type: req.memory_type,
         filename: req.filename,
         content: req.content,
     };
@@ -106,7 +99,6 @@ pub async fn read(
     let msg = FileOpRead {
         username: req.username,
         agent_id: req.agent_id,
-        memory_type: req.memory_type,
         filename: req.filename,
     };
     let content = state
@@ -129,7 +121,6 @@ pub async fn delete(
     let msg = FileOpDelete {
         username: req.username,
         agent_id: req.agent_id,
-        memory_type: req.memory_type,
         filename: req.filename,
     };
     state
@@ -166,43 +157,28 @@ mod tests {
     use super::*;
 
     #[test]
-    fn write_request_deserializes_snake_case_memory_type() {
+    fn write_request_deserializes() {
         let json = r#"{
             "username": "alice",
             "agent_id": "550e8400-e29b-41d4-a716-446655440000",
-            "memory_type": "daily_note",
             "filename": "2026-05-13.md",
             "content": "hello"
         }"#;
         let req: WriteRequest = serde_json::from_str(json).unwrap();
         assert_eq!(req.username, "alice");
-        assert_eq!(req.memory_type, MemoryType::DailyNote);
         assert_eq!(req.filename, "2026-05-13.md");
         assert_eq!(req.content, "hello");
     }
 
     #[test]
-    fn write_request_rejects_unknown_memory_type() {
-        let json = r#"{
-            "username": "alice",
-            "agent_id": "550e8400-e29b-41d4-a716-446655440000",
-            "memory_type": "garbage",
-            "filename": "x.md",
-            "content": ""
-        }"#;
-        assert!(serde_json::from_str::<WriteRequest>(json).is_err());
-    }
-
-    #[test]
-    fn read_request_long_term_memory_type() {
+    fn read_request_deserializes() {
         let json = r#"{
             "username": "bob",
             "agent_id": "550e8400-e29b-41d4-a716-446655440000",
-            "memory_type": "long_term",
-            "filename": "MEMORY.md"
+            "filename": "notes/MEMORY.md"
         }"#;
         let req: ReadRequest = serde_json::from_str(json).unwrap();
-        assert_eq!(req.memory_type, MemoryType::LongTerm);
+        assert_eq!(req.filename, "notes/MEMORY.md");
     }
 
     #[test]

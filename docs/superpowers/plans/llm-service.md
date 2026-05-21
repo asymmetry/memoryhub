@@ -35,7 +35,7 @@
 - `src/llm/config.rs` — add `prompts_dir`, `synthesis_context_max_chars`; rename `session_idle_timeout_secs` → `synthesis_idle_timeout_secs`.
 - `src/llm.rs` — `Embedder` wiring, `Synthesize` handler, `TaskDied` internal message; `LlmService::new` returns `Result`; remove `StartSession`.
 - `src/manager.rs` — adjust the `LlmService::new` call site.
-- `src/memory/path.rs` — replace `derive_synthesis_path` with `per_user_synthesis_path` / `global_synthesis_path`.
+- `src/memory/path.rs` — replace `derive_synthesis_path` with the date-named synthesis-path helpers `current_synthesis_path` / `latest_synthesis_path`.
 - `src/memory/synthesizer.rs` — rewrite `process()` as a two-pass flow over `Synthesize`.
 - `src/memory/manager.rs` — fix a test path assertion and a `LlmService::new` call site.
 
@@ -1021,7 +1021,7 @@ In `src/llm.rs`, add to the `tests` module a new test:
                 target: crate::llm::SynthesisTarget::User("alice".into()),
                 prior_summary: None,
                 sources: vec![crate::llm::SourceDoc {
-                    name: "alice/a/daily_note/x.md".into(),
+                    name: "alice/a/x.md".into(),
                     content: "hello".into(),
                 }],
             })
@@ -1293,6 +1293,14 @@ git commit -m "feat(llm): wire Embedder and Synthesize into LlmService"
 
 `derive_synthesis_path` is kept here so the crate compiles; it is removed in Task 9 after the Synthesizer stops using it.
 
+Synthesized output uses **date-named files** under the target's `_synthesized/` folder (see `memory-manager-design.md` → "Synthesized output files"):
+
+- Filename for a synthesis run on UTC date `D` is `{D}.md` (e.g. `2026-05-20.md`).
+- The "current" file (used both as the write target and as `prior_summary`) is the lexicographically greatest existing `{date}[-{n}].md` in the folder, or a fresh `{today}.md` if none exists.
+- A size cap `synthesis.max_file_bytes` (default 1 MiB) rolls the writer over to `{D}-1.md`, `{D}-2.md`, … when the would-be reused file is already at or above the cap.
+
+There is no `memory_type` segment anywhere in the synthesized path — folding happens across the entire user (or the entire global set).
+
 **Files:**
 - Modify: `src/memory/path.rs`
 - Test: `src/memory/path.rs` (test module)
@@ -1303,42 +1311,138 @@ In `src/memory/path.rs`, add to the `tests` module:
 
 ```rust
     #[test]
-    fn per_user_synthesis_path_has_no_memory_type() {
-        assert_eq!(
-            per_user_synthesis_path("alice"),
-            "alice/_synthesized/summary.md"
+    fn per_user_synthesis_path_uses_date_name() {
+        // Empty folder: fresh `{today}.md`, no suffix.
+        let p = current_synthesis_path(
+            std::path::Path::new("/nonexistent-memory-dir"),
+            &SynthesisTarget::User("alice".into()),
+            "2026-05-20",
+            1024 * 1024,
         );
+        assert_eq!(p, "alice/_synthesized/2026-05-20.md");
     }
 
     #[test]
-    fn global_synthesis_path_is_top_level() {
-        assert_eq!(global_synthesis_path(), "_synthesized/summary.md");
+    fn global_synthesis_path_uses_date_name() {
+        let p = current_synthesis_path(
+            std::path::Path::new("/nonexistent-memory-dir"),
+            &SynthesisTarget::Global,
+            "2026-05-20",
+            1024 * 1024,
+        );
+        assert_eq!(p, "_synthesized/2026-05-20.md");
     }
 ```
+
+`SynthesisTarget` is the type from `crate::llm` introduced in Task 5. The "today" string is passed in as a parameter so this test does not depend on wall-clock time; callers in production will source it from the `Clock` trait described in the memory-manager plan (clock injection is **not** introduced by this task — leave a TODO in the call sites until that lands).
 
 - [ ] **Step 2: Run test to verify it fails**
 
 Run: `cargo test -p clawchorus --lib path::`
-Expected: FAIL — compile error, `per_user_synthesis_path` / `global_synthesis_path` undefined.
+Expected: FAIL — compile error, `current_synthesis_path` / `latest_synthesis_path` undefined.
 
 - [ ] **Step 3: Add the helpers**
 
 In `src/memory/path.rs`, add after `derive_synthesis_path`:
 
 ```rust
-/// Per-user synthesized summary path: `{username}/_synthesized/summary.md`.
+use std::path::Path;
+
+use crate::llm::SynthesisTarget;
+
+/// Folder (relative to `memory_dir`) that holds synthesized output for `target`.
 ///
-/// A per-user summary folds both memory types together, so there is no
-/// `memory_type` segment.
-pub fn per_user_synthesis_path(username: &str) -> String {
-    format!("{}/_synthesized/summary.md", username)
+/// - `SynthesisTarget::User(u)` → `"{u}/_synthesized"`
+/// - `SynthesisTarget::Global` → `"_synthesized"`
+fn synthesis_folder(target: &SynthesisTarget) -> String {
+    match target {
+        SynthesisTarget::User(u) => format!("{}/_synthesized", u),
+        SynthesisTarget::Global => "_synthesized".to_string(),
+    }
 }
 
-/// Global (cross-user) synthesized summary path: `_synthesized/summary.md`.
-pub fn global_synthesis_path() -> String {
-    "_synthesized/summary.md".to_string()
+/// Return the path of the most recent existing synthesized file for `target`,
+/// or `None` if the folder is empty / does not exist.
+///
+/// "Most recent" = lexicographically greatest filename of the form
+/// `{date}[-{n}].md` under `{memory_dir}/{folder}`. The lexicographic order on
+/// the `YYYY-MM-DD[-{n}]` stem matches the desired write order because dates
+/// are zero-padded ISO-8601 and the optional `-{n}` suffix sorts after the
+/// bare date.
+pub fn latest_synthesis_path(memory_dir: &Path, target: &SynthesisTarget) -> Option<String> {
+    let folder = synthesis_folder(target);
+    let abs = memory_dir.join(&folder);
+    let entries = std::fs::read_dir(&abs).ok()?;
+    let mut best: Option<String> = None;
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if !name.ends_with(".md") {
+            continue;
+        }
+        if best.as_deref().map_or(true, |b| name.as_str() > b) {
+            best = Some(name);
+        }
+    }
+    best.map(|name| format!("{}/{}", folder, name))
+}
+
+/// Return the path the next synthesis run should write to for `target`.
+///
+/// Rules (see `memory-manager-design.md` → "Synthesized output files"):
+///
+/// 1. If no synthesized file exists yet under the target folder, write
+///    `{folder}/{today}.md`.
+/// 2. Otherwise inspect the lexicographically greatest existing file. If its
+///    on-disk size is **below** `max_file_bytes`, reuse it (the writer will
+///    overwrite — accumulation comes from new dated files, not from
+///    concatenation within one file).
+/// 3. If that file is at or above the cap, roll over: take its date stem and
+///    return the next free `{stem}-{n}.md` (starting at `n=1` and
+///    incrementing past any existing suffixes).
+///
+/// `today` is the UTC date in `YYYY-MM-DD` form, supplied by the caller. The
+/// helper deliberately does not read a clock so it is trivially testable; the
+/// Synthesizer will obtain it from the `Clock` trait introduced by the
+/// memory-manager plan.
+pub fn current_synthesis_path(
+    memory_dir: &Path,
+    target: &SynthesisTarget,
+    today: &str,
+    max_file_bytes: u64,
+) -> String {
+    let folder = synthesis_folder(target);
+
+    let Some(latest) = latest_synthesis_path(memory_dir, target) else {
+        return format!("{}/{}.md", folder, today);
+    };
+
+    let abs = memory_dir.join(&latest);
+    let size = std::fs::metadata(&abs).map(|m| m.len()).unwrap_or(0);
+    if size < max_file_bytes {
+        return latest;
+    }
+
+    // Roll over. Strip the trailing ".md" and any existing "-{n}" suffix to
+    // recover the date stem; then probe `-1`, `-2`, … until we find a free
+    // slot.
+    let file_name = latest.rsplit('/').next().unwrap_or(&latest);
+    let stem = file_name.strip_suffix(".md").unwrap_or(file_name);
+    let date_stem = match stem.rsplit_once('-') {
+        Some((head, tail)) if tail.chars().all(|c| c.is_ascii_digit()) => head.to_string(),
+        _ => stem.to_string(),
+    };
+    let mut n: u32 = 1;
+    loop {
+        let candidate = format!("{}/{}-{}.md", folder, date_stem, n);
+        if !memory_dir.join(&candidate).exists() {
+            return candidate;
+        }
+        n += 1;
+    }
 }
 ```
+
+Note: the legacy `per_user_synthesis_path` / `global_synthesis_path` flat helpers from earlier drafts of this plan are **not** introduced — they hard-coded `summary.md` and have been superseded by `current_synthesis_path` / `latest_synthesis_path`. The Synthesizer (Task 8) calls the new helpers directly.
 
 - [ ] **Step 4: Run test to verify it passes**
 
@@ -1362,16 +1466,30 @@ git commit -m "feat(memory): add stable synthesis path helpers"
 
 - [ ] **Step 1: Update the Synthesizer's own test**
 
-In `src/memory/synthesizer.rs`, replace the `synthesizer_writes_synthesis_after_cooldown` test's assertion block (the `target_dir` / `entries` part, old lines 337-350) with a stable-path check, and delete the two `common_username` tests entirely:
+In `src/memory/synthesizer.rs`, replace the `synthesizer_writes_synthesis_after_cooldown` test's assertion block (the `target_dir` / `entries` part, old lines 337-350) with a stable-path check via the new helper, and delete the two `common_username` tests entirely:
 
 ```rust
         tokio::time::sleep(Duration::from_millis(200)).await;
 
-        let summary = dir.path().join("alice").join("_synthesized").join("summary.md");
+        // The Synthesizer should have written exactly one per-user
+        // synthesized file under `alice/_synthesized/`. We don't hard-code the
+        // filename — it is `{utc-today}.md` — so we look it up via the
+        // helper introduced in Task 7.
+        let latest = crate::memory::path::latest_synthesis_path(
+            dir.path(),
+            &crate::llm::SynthesisTarget::User("alice".into()),
+        );
+        let rel = latest.expect("expected a per-user synthesized file under alice/_synthesized");
+        let summary = dir.path().join(&rel);
         assert!(
             summary.is_file(),
             "expected per-user summary at {:?}",
             summary
+        );
+        assert!(
+            rel.starts_with("alice/_synthesized/") && rel.ends_with(".md"),
+            "unexpected synthesized path: {}",
+            rel
         );
 ```
 
@@ -1379,14 +1497,15 @@ In `src/memory/synthesizer.rs`, replace the `synthesizer_writes_synthesis_after_
 
 - [ ] **Step 2: Update the MemoryManager integration test**
 
-In `src/memory/manager.rs`, in `write_emits_synthesis_after_cooldown`, replace the `synth_dir` / `entries` assertion block (old lines 388-400) with:
+In `src/memory/manager.rs`, in `write_emits_synthesis_after_cooldown`, replace the `synth_dir` / `entries` assertion block (old lines 388-400) with the analogous helper-based check:
 
 ```rust
-        let summary = dir
-            .path()
-            .join("alice")
-            .join("_synthesized")
-            .join("summary.md");
+        let latest = crate::memory::path::latest_synthesis_path(
+            dir.path(),
+            &crate::llm::SynthesisTarget::User("alice".into()),
+        );
+        let rel = latest.expect("expected a per-user synthesized file under alice/_synthesized");
+        let summary = dir.path().join(&rel);
         assert!(
             summary.is_file(),
             "expected per-user summary at {:?}",
@@ -1397,7 +1516,7 @@ In `src/memory/manager.rs`, in `write_emits_synthesis_after_cooldown`, replace t
 - [ ] **Step 3: Run tests to verify they fail**
 
 Run: `cargo test -p clawchorus --lib synthesizer_writes_synthesis_after_cooldown`
-Expected: FAIL — the old timestamped file is written under `.../long_term/`, so `alice/_synthesized/summary.md` does not exist yet. (`common_username` tests no longer compile if not deleted — ensure they are deleted.)
+Expected: FAIL — the old timestamped file is written under `.../long_term/`, so no `alice/_synthesized/{date}.md` exists yet. (`common_username` tests no longer compile if not deleted — ensure they are deleted.)
 
 - [ ] **Step 4: Rewrite the module head**
 
@@ -1426,14 +1545,33 @@ use crate::memory::{
     error::MemoryError,
     index::Index,
     messages::{Chunk, EnsureVecReady, FileChanged, IndexInsert, StorageRead, StorageWrite},
-    path::{global_synthesis_path, per_user_synthesis_path},
+    path::{current_synthesis_path, latest_synthesis_path},
     storage::Storage,
 };
 ```
 
 - [ ] **Step 5: Replace the `impl Synthesizer` body**
 
-Replace the entire `impl Synthesizer { ... }` block that contains `process()` and the free functions `build_synthesis_prompt`, `common_username`, `synthesis_filename` (old lines 43-246) with the following. Keep the `CooldownTick` struct (old lines 28-30) and the `Synthesizer` struct (old lines 32-41) as they are.
+Replace the entire `impl Synthesizer { ... }` block that contains `process()` and the free functions `build_synthesis_prompt`, `common_username`, `synthesis_filename` (old lines 43-246) with the following. Keep the `CooldownTick` struct (old lines 28-30) as it is, and extend the `Synthesizer` struct (old lines 32-41) with three new fields used by the date-named synthesis paths:
+
+```rust
+pub struct Synthesizer {
+    // ...existing fields (storage, index, llm, cooldown, chunk_size,
+    //                    chunk_overlap, pending, last_event)...
+
+    /// Root memory directory; needed to resolve absolute paths when looking
+    /// up the latest synthesized file and the rollover index.
+    memory_dir: std::path::PathBuf,
+    /// Size cap (bytes) that triggers rollover to `{date}-{n}.md`.
+    /// Sourced from `synthesis.max_file_bytes` in the memory config.
+    max_file_bytes: u64,
+    /// UTC-date provider, so tests can pin the date.
+    /// **Requires** the `Clock` trait introduced by the memory-manager plan;
+    /// until that lands, leave a `TODO(clock)` and inject a fixed-clock
+    /// implementation in tests.
+    clock: std::sync::Arc<dyn crate::memory::Clock>,
+}
+```
 
 ```rust
 impl Synthesizer {
@@ -1444,6 +1582,9 @@ impl Synthesizer {
         cooldown_secs: u64,
         chunk_size: usize,
         chunk_overlap: usize,
+        memory_dir: std::path::PathBuf,
+        max_file_bytes: u64,
+        clock: std::sync::Arc<dyn crate::memory::Clock>,
     ) -> Self {
         Self {
             storage,
@@ -1454,6 +1595,9 @@ impl Synthesizer {
             chunk_overlap,
             pending: BTreeSet::new(),
             last_event: None,
+            memory_dir,
+            max_file_bytes,
+            clock,
         }
     }
 
@@ -1515,15 +1659,20 @@ impl Synthesizer {
             return Ok(false);
         }
 
-        let summary_path = per_user_synthesis_path(user);
-        let prior_summary = self.storage_read(&summary_path).await?;
+        let target = SynthesisTarget::User(user.to_string());
+        let prior_path = latest_synthesis_path(&self.memory_dir, &target);
+        let prior_summary = match &prior_path {
+            Some(p) => self.storage_read(p).await?,
+            None => None,
+        };
         let synthesis = self
-            .request_synthesis(
-                SynthesisTarget::User(user.to_string()),
-                prior_summary,
-                sources,
-            )
+            .request_synthesis(target.clone(), prior_summary, sources)
             .await?;
+        // Write target: reuse current file if it is still under the cap,
+        // otherwise roll over to the next `-{n}` suffix.
+        let today = self.clock.today_utc();
+        let summary_path =
+            current_synthesis_path(&self.memory_dir, &target, &today, self.max_file_bytes);
         self.write_synthesis(&summary_path, &synthesis).await?;
         info!("Synthesizer: per-user synthesis written to {}", summary_path);
         Ok(true)
@@ -1533,7 +1682,10 @@ impl Synthesizer {
     async fn synthesize_global(&self, changed_users: &[String]) -> Result<(), MemoryError> {
         let mut sources = Vec::new();
         for user in changed_users {
-            let path = per_user_synthesis_path(user);
+            let target = SynthesisTarget::User(user.clone());
+            let Some(path) = latest_synthesis_path(&self.memory_dir, &target) else {
+                continue;
+            };
             if let Some(content) = self.storage_read(&path).await? {
                 sources.push(SourceDoc { name: path, content });
             }
@@ -1542,11 +1694,18 @@ impl Synthesizer {
             return Ok(());
         }
 
-        let summary_path = global_synthesis_path();
-        let prior_summary = self.storage_read(&summary_path).await?;
+        let target = SynthesisTarget::Global;
+        let prior_path = latest_synthesis_path(&self.memory_dir, &target);
+        let prior_summary = match &prior_path {
+            Some(p) => self.storage_read(p).await?,
+            None => None,
+        };
         let synthesis = self
-            .request_synthesis(SynthesisTarget::Global, prior_summary, sources)
+            .request_synthesis(target.clone(), prior_summary, sources)
             .await?;
+        let today = self.clock.today_utc();
+        let summary_path =
+            current_synthesis_path(&self.memory_dir, &target, &today, self.max_file_bytes);
         self.write_synthesis(&summary_path, &synthesis).await?;
         info!("Synthesizer: global synthesis written to {}", summary_path);
         Ok(())
@@ -1693,7 +1852,7 @@ And in the `FileChanged` handler, change its first line to the standard form:
 - [ ] **Step 7: Run tests to verify they pass**
 
 Run: `cargo test -p clawchorus --lib synthesizer && cargo test -p clawchorus --lib write_emits_synthesis_after_cooldown`
-Expected: PASS — `synthesizer_writes_synthesis_after_cooldown` and `write_emits_synthesis_after_cooldown` both find `alice/_synthesized/summary.md`.
+Expected: PASS — `synthesizer_writes_synthesis_after_cooldown` and `write_emits_synthesis_after_cooldown` both find a per-user synthesized file under `alice/_synthesized/{date}[-{n}].md` via `latest_synthesis_path`.
 
 These tests run from the crate root, so the `Default` config's `prompts_dir = ./prompts` resolves to the templates created in Task 3.
 
@@ -1738,9 +1897,9 @@ In `src/llm.rs`:
 
 - [ ] **Step 3: Remove `derive_synthesis_path` from `src/memory/path.rs`**
 
-In `src/memory/path.rs`, delete the `derive_synthesis_path` function and the two tests that use it (`per_user_synthesis_path` — the old test at line 69 named `per_user_synthesis_path`, and `cross_user_synthesis_path`). Keep the new `per_user_synthesis_path_has_no_memory_type` and `global_synthesis_path_is_top_level` tests added in Task 7.
+In `src/memory/path.rs`, delete the `derive_synthesis_path` function and the two tests that exercise it (the old `per_user_synthesis_path` test at line 69 and `cross_user_synthesis_path`). Keep the new `per_user_synthesis_path_uses_date_name` and `global_synthesis_path_uses_date_name` tests added in Task 7, and the `current_synthesis_path` / `latest_synthesis_path` helpers they cover.
 
-Note: there is an old test named `per_user_synthesis_path` (testing `derive_synthesis_path`) and a new function named `per_user_synthesis_path`. Deleting the old test removes the name clash.
+Note: the old `per_user_synthesis_path` / `cross_user_synthesis_path` tests targeted `derive_synthesis_path`-style flat paths and are no longer meaningful under the date-named scheme — delete them rather than try to port them.
 
 - [ ] **Step 4: Run the full suite to verify nothing broke**
 
@@ -1797,7 +1956,7 @@ Otherwise, no commit.
 
 ## Self-Review Notes
 
-- **Spec coverage:** `Embedder` (Task 4), `SynthesisTask` + `Synthesize` + `SynthesisTarget` + `SourceDoc` (Task 5), `LlmService` routing + `TaskDied` supervision (Task 6), prompt templates with provider override + hot-reload (Task 3), config fields incl. rename (Task 2), `Provider::name()` (Task 1), two-pass Synthesizer feeding only changed files (Task 8), stable summary paths without the `memory_type` segment (Task 7), removal of the generic `Session` API (Task 9). All `llm-service-design.md` and the Synthesizer section of `memory-manager-design.md` are covered.
+- **Spec coverage:** `Embedder` (Task 4), `SynthesisTask` + `Synthesize` + `SynthesisTarget` + `SourceDoc` (Task 5), `LlmService` routing + `TaskDied` supervision (Task 6), prompt templates with provider override + hot-reload (Task 3), config fields incl. rename (Task 2), `Provider::name()` (Task 1), two-pass Synthesizer feeding only changed files (Task 8), date-named synthesized paths with rollover via `current_synthesis_path` / `latest_synthesis_path` and no `memory_type` segment (Task 7), removal of the generic `Session` API (Task 9). All `llm-service-design.md` and the Synthesizer section of `memory-manager-design.md` are covered.
 - **Reset-and-reseed:** unified in `SynthesisTask::handle` — an empty `history` (cold start, post-restart, post-reset) reseeds from `prior_summary`; the Synthesizer always supplies the current on-disk summary.
 - **Type consistency:** `Synthesize { target, prior_summary, sources }`, `SourceDoc { name, content }`, `SynthesisTarget::{User, Global}`, `TemplateKind::{PerUser, Global}`, `load_template(prompts_dir, provider_name, kind)`, `SynthesisTask::new(provider, kind, prompts_dir, idle_timeout, max_retries, context_max_chars)`, `Embedder::new(provider, max_retries)`, `LlmService::new(config, provider) -> Result<Self, LlmError>` — used identically across Tasks 5, 6, and 8.
 - **Compile-safety:** `Session`/`StartSession` and `derive_synthesis_path` are kept until Task 9; every task leaves the crate building and the suite green.

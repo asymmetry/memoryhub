@@ -7,14 +7,14 @@
 #[derive(Debug, Clone)]
 pub struct TextChunk {
     pub text: String,
-    /// 1-indexed start line in the original file.
+    /// Start line in the original file (1-indexed).
     pub start_line: u32,
-    /// 1-indexed end line in the original file.
+    /// End line in the original file (1-indexed).
     pub end_line: u32,
 }
 
-/// Split `content` into overlapping chunks of `chunk_size` lines
-/// with `chunk_overlap` lines of overlap between consecutive chunks.
+/// Split `content` into overlapping chunks of `chunk_size` lines with `chunk_overlap` lines of
+/// overlap between consecutive chunks.
 ///
 /// Returns an empty vec if `content` is empty or whitespace-only.
 pub fn chunk_text(content: &str, chunk_size: usize, chunk_overlap: usize) -> Vec<TextChunk> {
@@ -94,24 +94,19 @@ mod tests {
         let content = lines.join("\n");
         let chunks = chunk_text(&content, 20, 5);
 
-        assert!(
-            chunks.len() > 1,
-            "Expected multiple chunks, got {}",
-            chunks.len()
+        let ranges: Vec<(u32, u32)> = chunks.iter().map(|c| (c.start_line, c.end_line)).collect();
+        assert_eq!(
+            ranges,
+            vec![
+                (1, 20),
+                (16, 35),
+                (31, 50),
+                (46, 65),
+                (61, 80),
+                (76, 95),
+                (91, 100),
+            ]
         );
-        assert_eq!(chunks[0].start_line, 1);
-
-        let last = chunks.last().unwrap();
-        assert_eq!(last.end_line, 100);
-
-        if chunks.len() >= 2 {
-            assert!(
-                chunks[1].start_line <= chunks[0].end_line,
-                "Expected overlap: chunk[1].start_line={} should be <= chunk[0].end_line={}",
-                chunks[1].start_line,
-                chunks[0].end_line
-            );
-        }
     }
 
     #[test]

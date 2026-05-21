@@ -45,9 +45,8 @@ impl Handler<Embed> for Embedder {
 
 #[cfg(test)]
 mod tests {
+    use super::super::{Embed, provider::mock::MockProvider};
     use super::*;
-    use crate::llm::Embed;
-    use crate::llm::provider::mock::MockProvider;
 
     #[tokio::test]
     async fn embedder_returns_mock_vectors() {

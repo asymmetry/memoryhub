@@ -192,9 +192,8 @@ impl Handler<Synthesize> for SynthesisTask {
 
 #[cfg(test)]
 mod tests {
+    use super::super::provider::{ChatResponse, mock::MockProvider};
     use super::*;
-    use crate::llm::provider::ChatResponse;
-    use crate::llm::provider::mock::MockProvider;
 
     /// Build a temp prompts dir holding a `per_user.md` template.
     fn prompts_dir() -> tempfile::TempDir {

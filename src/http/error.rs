@@ -97,7 +97,7 @@ mod tests {
 
     #[tokio::test]
     async fn memory_error_maps_to_500_with_message() {
-        let err = HttpError::Memory(MemoryError::Actor("boom".to_string()));
+        let err = HttpError::Memory(MemoryError::SendError("boom".into()));
         let (status, body) = body_string(err.into_response()).await;
         assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
         assert!(body.contains(r#""error":"internal""#));

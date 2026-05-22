@@ -91,10 +91,11 @@ async fn write_then_read_then_delete_then_read_404() {
         .body(Body::from(format!(
             r#"{{
                 "username":"alice",
-                "agent_id":"{agent_id}",
+                "agent_id":"{}",
                 "filename":"test.md",
                 "content":"hello"
-            }}"#
+            }}"#,
+            agent_id
         )))
         .unwrap();
     let resp = app.clone().oneshot(req).await.unwrap();
@@ -110,9 +111,10 @@ async fn write_then_read_then_delete_then_read_404() {
         .body(Body::from(format!(
             r#"{{
                 "username":"alice",
-                "agent_id":"{agent_id}",
+                "agent_id":"{}",
                 "filename":"test.md"
-            }}"#
+            }}"#,
+            agent_id
         )))
         .unwrap();
     let resp = app.clone().oneshot(req).await.unwrap();
@@ -128,9 +130,10 @@ async fn write_then_read_then_delete_then_read_404() {
         .body(Body::from(format!(
             r#"{{
                 "username":"alice",
-                "agent_id":"{agent_id}",
+                "agent_id":"{}",
                 "filename":"test.md"
-            }}"#
+            }}"#,
+            agent_id
         )))
         .unwrap();
     let resp = app.clone().oneshot(req).await.unwrap();
@@ -145,9 +148,10 @@ async fn write_then_read_then_delete_then_read_404() {
         .body(Body::from(format!(
             r#"{{
                 "username":"alice",
-                "agent_id":"{agent_id}",
+                "agent_id":"{}",
                 "filename":"test.md"
-            }}"#
+            }}"#,
+            agent_id
         )))
         .unwrap();
     let resp = app.oneshot(req).await.unwrap();
@@ -171,10 +175,11 @@ async fn search_after_write_returns_results() {
         .body(Body::from(format!(
             r#"{{
                 "username":"alice",
-                "agent_id":"{agent_id}",
+                "agent_id":"{}",
                 "filename":"notes.md",
                 "content":"Rust programming language is great"
-            }}"#
+            }}"#,
+            agent_id
         )))
         .unwrap();
     let resp = app.clone().oneshot(req).await.unwrap();
@@ -187,9 +192,10 @@ async fn search_after_write_returns_results() {
         .body(Body::from(format!(
             r#"{{
                 "username":"alice",
-                "agent_id":"{agent_id}",
+                "agent_id":"{}",
                 "query":"programming"
-            }}"#
+            }}"#,
+            agent_id
         )))
         .unwrap();
     let resp = app.oneshot(req).await.unwrap();

@@ -2,14 +2,14 @@
 
 ## Overview
 
-The LLM Service actor handles all outbound model API traffic for MemoryHub. It exposes two capabilities — **embedding** text batches and **synthesizing** documents — and hides provider-specific HTTP behind two traits, `Provider` (chat) and `EmbeddingProvider` (embeddings). It is a child of `Manager`, sibling to `MemoryManager` and the HTTP server.
+The LLM Service actor handles all outbound model API traffic for MemoryHub. It exposes two capabilities — **embedding** text batches and **synthesizing** documents — and hides provider-specific HTTP behind two traits, `Provider` (chat) and `EmbeddingProvider` (embeddings). It is a child of `MemoryHub`, sibling to `MemoryManager` and the HTTP server.
 
 Embedding and synthesis are kept apart at every level: separate child actors, separate messages, separate provider traits. This lets a deployment pair a chat-only vendor (e.g. DeepSeek) with a different embeddings vendor (e.g. OpenAI), which is the default configuration.
 
 ## Actor Hierarchy
 
 ```
-LlmService (long-lived, child of Manager) — single entry point
+LlmService (long-lived, child of MemoryHub) — single entry point
   ├── Embedder (long-lived) — handles Embed
   └── SynthesisTask (long-lived, one per SynthesisTarget; idle-terminates)
 ```

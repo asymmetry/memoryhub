@@ -1,10 +1,10 @@
-# HTTP Service — Component Design
+# HTTP Server — Component Design
 
 ## Overview
 
 The HTTP service exposes MemoryHub over a small JSON API consumed by agents. It is a thin Axum-based forwarder: each route deserializes a JSON body, sends one message to the `MemoryManager` actor, and serializes the reply. It owns no business logic and no state beyond the `MemoryManager` address.
 
-A single `HttpServer` actor (child of `Manager`, sibling to `MemoryManager` and `LlmService`) owns the `axum::serve` task and aborts it on stop. It has no message handlers — the handlers are plain async functions holding the `MemoryManager` address as Axum state. Keeping the server inside an actor is purely so it participates in supervision and shared shutdown; the request path itself never goes through the actor's mailbox.
+A single `HttpServer` actor (child of `MemoryHub`, sibling to `MemoryManager` and `LlmService`) owns the `axum::serve` task and aborts it on stop. It has no message handlers — the handlers are plain async functions holding the `MemoryManager` address as Axum state. Keeping the server inside an actor is purely so it participates in supervision and shared shutdown; the request path itself never goes through the actor's mailbox.
 
 ## Endpoints
 

@@ -2,7 +2,7 @@
 
 ## Overview
 
-The Memory Manager owns memory storage, metadata, and search. It is a child of `Manager` and holds the `LlmService` address for embedding and synthesis.
+The Memory Manager owns memory storage, metadata, and search. It is a child of `MemoryHub` and holds the `LlmService` address for embedding and synthesis.
 
 ## Actor Hierarchy
 

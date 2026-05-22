@@ -8,11 +8,11 @@ MemoryHub is a centralized memory management and sharing service that pools indi
 
 ## Architecture
 
-Single Rust binary built on the `acktor` actor framework (Tokio). The `Manager` actor supervises three child actors:
+Single Rust binary built on the `acktor` actor framework (Tokio). The top-level `MemoryHub` actor (named after the crate) supervises three child actors:
 
 ```
                       +-----------+
-                      |  Manager  |
+                      | MemoryHub |
                       +-----+-----+
                             |
           +-----------------+----------------+
@@ -23,10 +23,10 @@ Single Rust binary built on the `acktor` actor framework (Tokio). The `Manager` 
    +-------------+ +----------------+ +-------------+
 ```
 
-- **HTTP Server** — REST front door. A thin forwarder: turns each request into one `MemoryManager` message and serializes the reply. See `http-service-design.md`.
+- **HTTP Server** — REST front door. A thin forwarder: turns each request into one `MemoryManager` message and serializes the reply. See `http-server-design.md`.
 - **Memory Manager** — owns storage, the SQLite index, and the synthesizer; runs the read/write/search pipelines. See `memory-manager-design.md`.
 - **LLM Service** — all outbound model traffic: embedding and document synthesis. See `llm-service-design.md`.
-- **Manager** — top-level supervisor; spawns and monitors the three children, runs no business logic. See `manager-design.md`.
+- **MemoryHub** — top-level supervisor; spawns and monitors the three children, runs no business logic. See `supervisor-design.md`.
 
 ## Design Decisions
 

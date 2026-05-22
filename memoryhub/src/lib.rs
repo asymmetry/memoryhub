@@ -5,5 +5,5 @@ pub mod http;
 pub mod llm;
 pub mod memory;
 
-mod manager;
-pub use manager::MemoryHub;
+mod supervisor;
+pub use supervisor::MemoryHub;

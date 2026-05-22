@@ -6,7 +6,7 @@ use clap::Parser;
 use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
 
-use memoryhub::{MemoryHub, config};
+use memoryhub::{Config, MemoryHub};
 
 mod cli;
 use cli::Cli;
@@ -21,10 +21,10 @@ async fn main() -> Result<()> {
     };
     tracing_subscriber::fmt().with_env_filter(filter).init();
 
-    let base_dir = config::base_dir(cli.base_dir.as_deref())?;
+    let base_dir = Config::base_dir(cli.base_dir.as_deref())?;
     info!("Using base directory {}", base_dir.display());
 
-    let mut config = config::Config::load(cli.config.clone(), &base_dir).await?;
+    let mut config = Config::load(cli.config.clone(), &base_dir).await?;
     cli.apply_overrides(&mut config);
     info!(
         "MemoryHub starting on {}:{}",

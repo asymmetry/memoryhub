@@ -239,10 +239,11 @@ mod tests {
     use super::*;
     use crate::memory::message::{FileOpDelete, FileOpRead, FileOpWrite, Search};
 
-    fn test_llm() -> Address<LlmService> {
+    fn test_llm(dir: &std::path::Path) -> Address<LlmService> {
         let cfg = crate::llm::LlmConfig {
             provider: "mock".into(),
             embedding_provider: "mock".into(),
+            prompts_dir: dir.join("prompts"),
             ..Default::default()
         };
         let (addr, _handle) = LlmService::new(cfg).start("llm-test").unwrap();
@@ -261,7 +262,7 @@ mod tests {
     async fn full_write_read_delete_cycle() {
         let dir = tempfile::tempdir().unwrap();
 
-        let mm = MemoryManager::new(test_config(dir.path()), test_llm());
+        let mm = MemoryManager::new(test_config(dir.path()), test_llm(dir.path()));
         let (addr, _handle) = mm.start("memory-manager").unwrap();
 
         let agent_id = Uuid::new_v4();
@@ -324,7 +325,7 @@ mod tests {
     async fn search_after_write() {
         let dir = tempfile::tempdir().unwrap();
 
-        let mm = MemoryManager::new(test_config(dir.path()), test_llm());
+        let mm = MemoryManager::new(test_config(dir.path()), test_llm(dir.path()));
         let (addr, _handle) = mm.start("memory-manager").unwrap();
 
         let agent_id = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440000").unwrap();
@@ -363,7 +364,7 @@ mod tests {
         let mut cfg = test_config(dir.path());
         cfg.synthesizer_cooldown_secs = 0;
 
-        let mm = MemoryManager::new(cfg, test_llm());
+        let mm = MemoryManager::new(cfg, test_llm(dir.path()));
         let (addr, _handle) = mm.start("memory-manager").unwrap();
 
         let agent_id = Uuid::new_v4();

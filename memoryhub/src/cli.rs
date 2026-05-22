@@ -50,7 +50,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_defaults_are_none() {
+    fn defaults_are_none() {
         let cli = Cli::try_parse_from(["memoryhub"]).unwrap();
         assert!(cli.base_dir.is_none());
         assert!(cli.config.is_none());
@@ -60,7 +60,7 @@ mod tests {
     }
 
     #[test]
-    fn test_flags_parse() {
+    fn parse_flags() {
         let cli = Cli::try_parse_from([
             "memoryhub",
             "--base-dir",
@@ -83,23 +83,20 @@ mod tests {
     }
 
     #[test]
-    fn test_invalid_port_rejected() {
+    fn invalid_port_rejected() {
         let result = Cli::try_parse_from(["memoryhub", "--port", "not-a-number"]);
         assert!(result.is_err());
     }
 
     #[test]
-    fn test_apply_overrides_sets_present_fields() {
+    fn apply_overrides() {
         let cli =
             Cli::try_parse_from(["memoryhub", "--host", "1.2.3.4", "--port", "9000"]).unwrap();
         let mut config = Config::default();
         cli.apply_overrides(&mut config);
         assert_eq!(config.server.host, "1.2.3.4");
         assert_eq!(config.server.port, 9000);
-    }
 
-    #[test]
-    fn test_apply_overrides_leaves_absent_fields() {
         let cli = Cli::try_parse_from(["memoryhub"]).unwrap();
         let mut config = Config::default();
         let default = Config::default();

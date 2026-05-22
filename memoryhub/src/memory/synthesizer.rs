@@ -352,6 +352,7 @@ mod tests {
         let llm_cfg = crate::llm::LlmConfig {
             provider: "mock".into(),
             embedding_provider: "mock".into(),
+            prompts_dir: dir.path().join("prompts"),
             ..Default::default()
         };
         let (llm, h3) = LlmService::new(llm_cfg).start("l").unwrap();

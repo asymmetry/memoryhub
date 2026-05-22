@@ -112,7 +112,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn defaults_are_populated() {
+    fn defaults() {
         let c = LlmConfig::default();
         assert_eq!(
             c.synthesis_idle_timeout_secs,
@@ -126,33 +126,7 @@ mod tests {
             c.synthesis_context_max_chars,
             default_synthesis_context_max_chars()
         );
-    }
 
-    #[test]
-    fn resolve_paths_joins_relative_prompts_dir_onto_base() {
-        let base = Path::new("/data/mh");
-        let mut c = LlmConfig::default();
-        c.resolve_paths(base);
-        assert_eq!(c.prompts_dir, base.join("prompts"));
-    }
-
-    #[test]
-    fn resolve_paths_leaves_absolute_prompts_dir_unchanged() {
-        let abs = if cfg!(windows) {
-            PathBuf::from("C:\\custom\\prompts")
-        } else {
-            PathBuf::from("/custom/prompts")
-        };
-        let mut c = LlmConfig {
-            prompts_dir: abs.clone(),
-            ..LlmConfig::default()
-        };
-        c.resolve_paths(Path::new("/data/mh"));
-        assert_eq!(c.prompts_dir, abs);
-    }
-
-    #[test]
-    fn partial_toml_uses_defaults_for_new_fields() {
         let toml_in = r#"
 provider = "deepseek"
 embedding_provider = "openai"
@@ -172,5 +146,28 @@ embedding_model = "text-embedding-3-small"
             c.synthesis_context_max_chars,
             default_synthesis_context_max_chars()
         );
+    }
+
+    #[test]
+    fn resolve_paths_joins_relative_paths_onto_base() {
+        let base = Path::new("/data/mh");
+        let mut c = LlmConfig::default();
+        c.resolve_paths(base);
+        assert_eq!(c.prompts_dir, base.join("prompts"));
+    }
+
+    #[test]
+    fn resolve_paths_leaves_absolute_paths_unchanged() {
+        let abs = if cfg!(windows) {
+            PathBuf::from("C:\\custom\\prompts")
+        } else {
+            PathBuf::from("/custom/prompts")
+        };
+        let mut c = LlmConfig {
+            prompts_dir: abs.clone(),
+            ..LlmConfig::default()
+        };
+        c.resolve_paths(Path::new("/data/mh"));
+        assert_eq!(c.prompts_dir, abs);
     }
 }

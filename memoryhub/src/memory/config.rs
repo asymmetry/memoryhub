@@ -55,9 +55,8 @@ impl Default for MemoryConfig {
 impl MemoryConfig {
     /// Resolves `memory_dir` and `db_path` against the base directory.
     ///
-    /// The SQLite `:memory:` sentinel and absolute paths are left unchanged; a
-    /// `~/…` prefix expands to the home directory; any other relative path is
-    /// joined onto `base`.
+    /// The SQLite `:memory:` sentinel and absolute paths are left unchanged; a `~/…` prefix
+    /// expands to the home directory; any other relative path is joined onto `base`.
     pub fn resolve_paths(&mut self, base: &Path) -> Result<(), ConfigError> {
         self.memory_dir = resolve_path(base, &self.memory_dir)?;
         if self.db_path != ":memory:" {
@@ -69,6 +68,7 @@ impl MemoryConfig {
 }
 
 /// Resolves a single configured path string against the base directory.
+#[inline]
 fn resolve_path(base: &Path, value: &str) -> Result<String, ConfigError> {
     if let Some(rest) = value.strip_prefix("~/") {
         let home = dirs::home_dir().ok_or(ConfigError::NoHomeDir)?;
@@ -85,7 +85,20 @@ mod tests {
     use super::*;
 
     #[test]
-    fn resolve_paths_joins_relative_defaults_onto_base() {
+    fn defaults() {
+        let config = MemoryConfig::default();
+        assert_eq!(config.memory_dir, "memory");
+        assert_eq!(config.db_path, "memoryhub.db");
+        assert_eq!(config.chunk_size, 400);
+        assert_eq!(config.chunk_overlap, 80);
+        assert_eq!(config.temporal_decay_days, 30);
+        assert_eq!(config.hybrid_weight, 0.5);
+        assert_eq!(config.synthesizer_cooldown_secs, 300);
+        assert_eq!(config.synthesis_max_file_bytes, 1024 * 1024);
+    }
+
+    #[test]
+    fn resolve_paths_joins_relative_paths_onto_base() {
         let base = Path::new("/data/mh");
         let mut config = MemoryConfig::default();
         config.resolve_paths(base).unwrap();
@@ -107,12 +120,6 @@ mod tests {
         assert!(!config.memory_dir.starts_with("~/"));
         assert_eq!(config.memory_dir, home.join("mem").to_string_lossy());
         assert_eq!(config.db_path, home.join("mh.db").to_string_lossy());
-    }
-
-    #[test]
-    fn default_synthesizer_cooldown_is_300s() {
-        let config = MemoryConfig::default();
-        assert_eq!(config.synthesizer_cooldown_secs, 300);
     }
 
     #[test]

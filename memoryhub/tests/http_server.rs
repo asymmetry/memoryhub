@@ -24,6 +24,7 @@ async fn spawn_memory_manager(dir: &std::path::Path) -> Address<MemoryManager> {
     let llm_cfg = LlmConfig {
         provider: "mock".into(),
         embedding_provider: "mock".into(),
+        prompts_dir: dir.join("prompts"),
         ..Default::default()
     };
     let (llm_addr, _llm_handle) = LlmService::new(llm_cfg).start("llm-test").unwrap();

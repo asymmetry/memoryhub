@@ -8,7 +8,7 @@ Design lives in `docs/` — start with `docs/memoryhub-design.md`.
 
 Cargo workspace; the `memoryhub` crate lives in `memoryhub/`. Sibling top-level folders: `docker/` (build & deployment assets) and `agents/` (plugins for Claude Code, OpenClaw, Codex, etc.).
 
-Single Rust binary on the `acktor` actor framework (Tokio). `MemoryHub` (`memoryhub/src/manager.rs`) supervises three children:
+Single Rust binary on the `acktor` actor framework (Tokio). `MemoryHub` (`memoryhub/src/supervisor.rs`) supervises three children:
 
 - `memoryhub/src/http/` — Axum REST, forwards to `MemoryManager`. Routes under `/v1/*`.
 - `memoryhub/src/memory/` — `Storage`, `Index` (SQLite + sqlite-vec + FTS5), `Synthesizer`, plus per-request `FileOp` / `SearchOp`.

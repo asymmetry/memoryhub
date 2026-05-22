@@ -12,3 +12,5 @@ coverage:
 ignore:
   # test utilities
   - "**/mock.*"
+  # binary entry point
+  - "**/main.rs"

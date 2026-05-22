@@ -1,0 +1,54 @@
+[package]
+name = "memoryhub"
+version = "0.0.1"
+description = "Centralized memory service for teams of AI agents"
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+categories.workspace = true
+readme = "../README.md"
+keywords.workspace = true
+exclude = ["tests/*"]
+
+[features]
+default = []
+_test = []
+
+[dependencies]
+acktor.workspace = true
+ahash.workspace = true
+anyhow.workspace = true
+axum.workspace = true
+chrono.workspace = true
+dirs.workspace = true
+rand.workspace = true
+reqwest = { workspace = true, features = [
+    "json",
+    "rustls",
+], default-features = false }
+rusqlite = { workspace = true, features = ["bundled", "column_decltype"] }
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+sqlite-vec.workspace = true
+thiserror.workspace = true
+toml.workspace = true
+tokio = { workspace = true, features = [
+    "fs",
+    "macros",
+    "net",
+    "rt-multi-thread",
+    "signal",
+] }
+tower-http = { workspace = true, features = ["trace"] }
+tracing.workspace = true
+tracing-subscriber.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+memoryhub = { path = ".", features = ["_test"] }
+tempfile.workspace = true
+tower.workspace = true
+wiremock.workspace = true

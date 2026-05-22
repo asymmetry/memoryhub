@@ -74,8 +74,10 @@ pub fn build_providers(
 ) -> Result<(Arc<dyn Provider>, Arc<dyn EmbeddingProvider>), LlmError> {
     if config.provider == config.embedding_provider {
         match config.provider.as_str() {
+            // A provider serving both roles is treated as a chat provider:
+            // it reads `api_key_env` / `base_url`.
             "openai" => {
-                let p = Arc::new(openai::OpenAiProvider::new(config)?);
+                let p = Arc::new(openai::OpenAiProvider::new_chat(config)?);
                 return Ok((p.clone(), p));
             }
             #[cfg(any(test, feature = "_test"))]
@@ -89,14 +91,14 @@ pub fn build_providers(
 
     let chat: Arc<dyn Provider> = match config.provider.as_str() {
         "deepseek" => Arc::new(deepseek::DeepSeekProvider::new(config)?),
-        "openai" => Arc::new(openai::OpenAiProvider::new(config)?),
+        "openai" => Arc::new(openai::OpenAiProvider::new_chat(config)?),
         #[cfg(any(test, feature = "_test"))]
         "mock" => Arc::new(mock::MockProvider::default()),
         other => return Err(LlmError::UnknownProvider(other.to_string())),
     };
 
     let embedding: Arc<dyn EmbeddingProvider> = match config.embedding_provider.as_str() {
-        "openai" => Arc::new(openai::OpenAiProvider::new(config)?),
+        "openai" => Arc::new(openai::OpenAiProvider::new_embedding(config)?),
         #[cfg(any(test, feature = "_test"))]
         "mock" => Arc::new(mock::MockProvider::default()),
         other => return Err(LlmError::UnknownProvider(other.to_string())),

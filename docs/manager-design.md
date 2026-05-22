@@ -2,43 +2,23 @@
 
 ## Overview
 
-The `Manager` actor is MemoryHub's top-level supervisor. It owns the three sub-system actors — `LlmService`, `MemoryManager`, and `HttpServer` — supervises them, and tears the whole system down cleanly when any of them fails. It runs no business logic and receives no external traffic.
+`Manager` is MemoryHub's top-level supervisor. It owns the three sub-system actors — `LlmService`, `MemoryManager`, `HttpServer` — supervises them, and tears the system down cleanly when any fails. It runs no business logic and receives no external traffic.
 
-This iteration is **log-only**: there is no restart logic. Any child death stops the process; an operator restarts it.
+This iteration is **log-only**: there is no restart logic. Any child death stops the process; an operator restarts it. Restart/backoff policies are deliberately deferred until the failure modes are better understood.
 
 ## Lifecycle
 
-`Manager::new` just holds the config. When the Manager actor starts, it spawns the three children in dependency order — `LlmService`, then `MemoryManager` (needs the LLM), then `HttpServer` (needs the Memory Manager). Each child is spawned with the Manager already registered as its supervisor, so no child can fail before supervision is in place. If any child fails to spawn, the Manager fails to start.
+Children are spawned in dependency order — `LlmService`, then `MemoryManager` (needs the LLM), then `HttpServer` (needs the Memory Manager). Each is spawned with `Manager` already registered as its supervisor, so no child can fail before supervision is in place. If any child fails to spawn, the `Manager` fails to start.
 
-## Supervision
+## Supervision & Shutdown
 
-The Manager handles supervision events from each child:
+Child supervision events: a warning is logged and the child continues; a terminated/panicked event is logged and the `Manager` stops itself. Stopping converges with the operator path (ctrl-c, signalled from `main`) on the same teardown: children are terminated in reverse startup order (`HttpServer` → `MemoryManager` → `LlmService`), each awaited. A child that already died is handled harmlessly. `main` waits for the `Manager` to finish, bounded by a timeout so a stuck child cannot block process exit.
 
-- **Warning** — logged; the child continues.
-- **Terminated or panicked** — logged; the Manager stops itself, which triggers shutdown.
-- Other lifecycle events are ignored.
+Reverse-order teardown ensures the front door closes before its dependencies: `HttpServer` stops accepting requests before `MemoryManager` goes away, which stops before `LlmService`.
 
-## Shutdown
+## Errors
 
-Shutdown has two triggers, both converging on the same teardown:
-
-- **Operator (ctrl-c)** — `main` signals the Manager to stop.
-- **Child failure** — the Manager stops itself on a terminated/panicked event.
-
-Either way, the Manager terminates its three children in reverse startup order (`HttpServer` → `MemoryManager` → `LlmService`), waiting for each to stop. A child that already died is handled harmlessly. `main` waits for the Manager to finish, bounded by a timeout so a stuck child cannot block process exit.
-
-## Error Type
-
-`ManagerError` wraps the child sub-system errors (`LlmError`, `MemoryError`, `HttpServerError`) plus an actor-messaging variant. Child spawn failures surface through it and abort startup.
-
-## Testing
-
-Integration tests in `tests/manager.rs` cover the two paths:
-
-- **Clean shutdown** — start the Manager, signal it to stop, expect it to stop within a timeout.
-- **Fault shutdown** — make a child fail, expect the Manager to detect it and stop itself within a timeout.
-
-Tests run against an in-memory mock LLM provider, gated behind a hidden Cargo feature so it never ships in release builds.
+`MemoryHubError` (in `src/error.rs`) wraps the three child errors — `Llm(LlmError)`, `Memory(MemoryError)`, `Http(HttpServerError)` — via `From`. Child spawn failures surface through these and abort startup.
 
 ## Out of Scope (Future Work)
 

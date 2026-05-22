@@ -2,247 +2,76 @@
 
 ## Overview
 
-The Memory Manager actor manages memory storage, metadata, and search within MemoryHub. It is a child actor of the Manager supervisor and holds references to the LLM Service actor for embedding operations.
+The Memory Manager owns memory storage, metadata, and search. It is a child of `Manager` and holds the `LlmService` address for embedding and synthesis.
 
 ## Actor Hierarchy
 
 ```
-Memory Manager Actor
-  ├── Storage Actor (long-lived) — filesystem I/O
-  ├── Index Actor (long-lived) — SQLite metadata + vectors + FTS5
-  ├── Synthesizer Actor (long-lived) — event-driven synthesis
-  ├── FileOp Actor (per-request, short-lived) — save/get/delete pipeline
-  └── Search Actor (per-request, short-lived) — search pipeline
+Memory Manager
+  ├── Storage (long-lived)     — filesystem I/O
+  ├── Indexer (long-lived)     — SQLite metadata + vectors + FTS5
+  ├── Synthesizer (long-lived) — event-driven cross-user synthesis
+  ├── FileOp (per-request)     — write/read/delete pipeline
+  └── Search (per-request)     — search pipeline
 ```
 
-- Memory Manager spawns and supervises the three long-lived child actors on startup.
-- For each incoming FileOp or Search message, Memory Manager spawns a short-lived child actor, passing it the addresses of Storage, Index, Synthesizer, and LLM Service. The child runs the pipeline and dies.
+The three long-lived children are spawned on startup. Each incoming request spawns a short-lived `FileOp` or `Search` actor with the addresses it needs; it runs one pipeline and dies. Per-request actors keep each request's state isolated and let the Memory Manager itself stay a thin router.
 
-## External Messages
+## Messages
 
-Messages received by Memory Manager from HTTP Server:
+**External** (from HTTP Server): `FileOpWrite`, `FileOpRead`, `FileOpDelete`, `Search`, all carrying `username` + `agent_id` (plus `filename`/`content`/`query`). `filename` is opaque — the agent embeds any sub-path in it, and the Memory Manager flattens `/` and `\` to `_` before touching disk or index.
 
-| Message        | Fields                                | Reply              |
-| -------------- | ------------------------------------- | ------------------ |
-| FileOp::Write  | username, agent_id, filename, content | Ok / Error         |
-| FileOp::Read   | username, agent_id, filename          | content / NotFound |
-| FileOp::Delete | username, agent_id, filename          | Ok / Error         |
-| Search         | username, agent_id, query             | Vec<SearchResult>  |
-
-`filename` is opaque to the memory manager: the agent embeds any sub-path (e.g. `notes/2026-03-31.md`) directly in it. The memory manager flattens it into a single path segment by replacing every `/` and `\` with `_` before touching disk or index. There is no notion of `memory_type` — that concept lives only in OpenClaw.
-
-## Internal Messages
-
-Messages between child actors:
-
-### Storage Messages
-
-| From                       | Message                  | Reply              |
-| -------------------------- | ------------------------ | ------------------ |
-| FileOp Actor / Synthesizer | Write(rel_path, content) | Ok / Error         |
-| FileOp Actor / Synthesizer | Read(rel_path)           | content / NotFound |
-| FileOp Actor / Synthesizer | Delete(rel_path)         | Ok / Error         |
-
-### Index Messages
-
-| From                       | Message                                      | Reply               |
-| -------------------------- | -------------------------------------------- | ------------------- |
-| FileOp Actor / Synthesizer | Insert(path, Vec\<Chunk\>)                   | Ok / Error          |
-| FileOp Actor / Synthesizer | Delete(path)                                 | Ok / Error          |
-| Search Actor               | Search(Vec\<Embedding\>, username, agent_id) | Vec\<SearchResult\> |
-
-### Synthesizer Messages
-
-| From         | Message               | Reply                  |
-| ------------ | --------------------- | ---------------------- |
-| FileOp Actor | FileChanged(rel_path) | None (fire-and-forget) |
-
-### LLM Service Messages
-
-| From                                      | Message                                    | Reply            |
-| ----------------------------------------- | ------------------------------------------ | ---------------- |
-| FileOp Actor / Search Actor / Synthesizer | Embed(Vec\<String\>)                       | Vec\<Embedding\> |
-| Synthesizer                               | Synthesize(target, prior_summary, sources) | synthesized text |
-
-`Synthesize` routes to a long-lived per-target synthesis task inside LLM Service that owns prompt engineering and conversation context. See `llm-service-design.md`.
+**Internal**: Storage takes `StorageWrite`/`StorageRead`/`StorageDelete` keyed by `rel_path`. The Indexer takes `IndexInsert`/`IndexDelete` and `IndexSearch` (embeddings + identity scope). The Synthesizer takes `FileChanged(rel_path)`, fire-and-forget. Embedding and synthesis go to `LlmService` (`Embed`, `Synthesize`); `Synthesize` routes to a long-lived per-target task there that owns prompt engineering and context (see `llm-service-design.md`).
 
 ## Pipelines
 
-### Write
+**Write** — derive `rel_path`; write to Storage; chunk the content; `Embed` the chunks; `IndexInsert`. If indexing fails, delete the file from Storage (rollback) so disk and index never diverge. On success, notify the Synthesizer with `FileChanged` (fire-and-forget), then reply.
 
-1. FileOp Actor derives `rel_path` from (username, agent*id, filename) — `filename` is flattened by replacing `/` and `\` with `*`
-2. Send Write(rel_path, content) → Storage
-3. Chunk the content (~400 tokens, 80-token overlap)
-4. Send Embed(chunks) → LLM Service
-5. Send Insert(path, chunks_with_embeddings) → Index
-6. If Index fails, send Delete(rel_path) → Storage (rollback)
-7. Send FileChanged(rel_path) → Synthesizer (fire-and-forget, only on success)
-8. Reply Ok to sender
+**Read** — derive `rel_path`; read from Storage; reply with content or NotFound.
 
-### Read
+**Delete** — remove from the Indexer **first**, then from Storage. Index-first means a crash mid-delete leaves an orphaned file (harmless, re-indexable) rather than an index entry pointing at a missing file.
 
-1. FileOp Actor derives `rel_path`
-2. Send Read(rel_path) → Storage
-3. Reply with content or NotFound
+**Search** — chunk the query; `Embed`; `IndexSearch` scoped to the caller's `(username, agent_id)`; reply with scored results.
 
-### Delete
+**Synthesizer** — `FileChanged` paths accumulate into a pending set, batched by a cool-down timer. On expiry it runs two passes, feeding only the files changed this cycle (the long-lived synthesis tasks preserve prior context, so raw memories are never re-sent in bulk):
 
-1. FileOp Actor derives `rel_path`
-2. Send Delete(path) → Index (remove metadata + vectors first)
-3. Send Delete(rel_path) → Storage (remove file)
-4. Reply Ok to sender
+- _Per-user pass_ — group pending paths by user; for each, `Synthesize(User, prior_summary, sources)` from the user's changed files plus their current synthesized file, and write the result back. One user's failure is logged and skipped; the rest proceed.
+- _Global pass_ — runs only if at least one per-user summary was regenerated; its sources are those summaries, with the current global synthesized file as `prior_summary`.
 
-### Search
+`prior_summary` is the most recent on-disk synthesized file for the target, passed so a cold or just-reset task can reseed without losing state.
 
-1. Search Actor chunks the query (~400 tokens, 80-token overlap)
-2. Send Embed(query_chunks) → LLM Service
-3. Send Search(embeddings, username, agent_id) → Index
-4. Reply with scored results
+## Storage & Filesystem Layout
 
-### Synthesizer
+Storage is a dumb path-based wrapper — no knowledge of memory types, SQLite, or search. Writes are atomic (temp-then-rename) to avoid partial reads; reads return None for missing files; deletes are idempotent. Files are plain Markdown with no frontmatter. `rel_path` is always derived by the caller (FileOp for raw memories, Synthesizer for synthesized files), never by Storage.
 
-**On FileChanged(rel_path):** accumulate the path into a pending set. Processing triggers once the cool-down timer expires, then the timer resets.
+Under the configured `memory_dir`:
 
-**Processing (when cool-down expires)** runs two passes. The Synthesizer feeds only the files that changed this cycle to LLM Service; the long-lived synthesis tasks there preserve prior context, so raw memories are never re-sent in bulk. `prior_summary` is the most recent on-disk synthesized file for that target, passed so a cold or just-reset task can reseed without losing state. Each synthesis: Read the source files from Storage, send `Synthesize` to LLM Service, chunk and `Embed` the returned text, then Write it to Storage and Insert it into Index.
+- Raw memory: `{username}/{agent_id}/{flattened_filename}`
+- Per-user synthesis: `{username}/_synthesized/{date}-{NN}.md`
+- Cross-user synthesis: `_synthesized/{date}-{NN}.md`
 
-- _Per-user pass_ — group the pending paths by user (first path segment, skipping `_synthesized`). For each affected user: read that user's changed files plus the user's current synthesized file (the `prior_summary`), send `Synthesize(User(username), prior_summary, sources)`, and write the result to the current per-user synthesized file (see [Synthesized output files](#synthesized-output-files) for the naming and rotation rules). A failure for one user is logged and skipped; remaining users still proceed.
-- _Global pass_ — runs if at least one per-user summary was regenerated. The sources are the per-user summaries produced this cycle; with the current global synthesized file as `prior_summary`, send `Synthesize(Global, prior_summary, sources)` and write the result to the current global synthesized file.
+The `_synthesized` directory separates synthesized output from raw memories at both levels.
 
-All of a user's raw files feed the same per-user task — there is no per-category synthesis. Finally, clear the pending set.
+### Synthesized output files
 
-#### Synthesized output files
+Synthesized output accumulates as dated files rather than a single overwritten file, with a size cap:
 
-Synthesized output is not a single overwritten file. It accumulates over time as date-named files with a size cap:
+- A run on date `D` writes `{D}-{NN}.md` (`NN` is a zero-padded 2-digit sequence starting at `01`, UTC).
+- The "current" file — the write target and the next run's `prior_summary` — is the lexicographically greatest existing `{date}-{NN}.md`, or a fresh `{today}-01.md` if none exists.
+- If that file is already at or above `synthesis.max_file_bytes` (default 1 MiB), the writer rolls to the next suffix instead.
+- Each run writes the full synthesized text; accumulation comes from the sequence of dated files, not concatenation within a file. Old files are never pruned (out of scope).
 
-- Filename for a synthesis run on date `D` is `{D}.md` (e.g. `2026-05-20.md`), in UTC.
-- If appending the new content would push the file above the configured cap (`synthesis.max_file_bytes`, default 1 MiB), the writer rolls over to a suffixed file: `{D}-1.md`, `{D}-2.md`, …
-- "Current" synthesized file (used both as the write target and as `prior_summary` for the next run) is the lexicographically greatest existing `{date}[-{n}].md` under the target folder, or a fresh `{today}.md` if none exists.
-- Each synthesis writes the full new synthesized text — it does not diff or merge with the prior file on disk. Accumulation comes from the sequence of dated files, not from concatenation within one file. The cap is enforced by checking the size of the file the writer would otherwise reuse; if it is already at or above the cap, the writer creates the next suffixed file instead.
-- Old files are never deleted by the Synthesizer. Retention/pruning is out of scope for this iteration.
+## Index
 
-## Storage Actor
+SQLite-based metadata, vector, and keyword index over four logical stores:
 
-Dumb path-based filesystem wrapper. Knows nothing about memory types, SQLite, or search.
+- **files** — one row per indexed file (path, source `raw`/`synthesized`, size, updated-at) for change detection.
+- **chunks** — text chunks with 1-indexed `start_line`/`end_line`, model, and text. Chunk id is `{path}#{chunk_index}` (0-based). Insert deletes all of a path's existing chunks first and re-inserts, so chunk ids need not be stable.
+- **chunks_fts** — FTS5 virtual table over chunk text (unicode61 tokenizer) for BM25 keyword search.
+- **chunks_vec** — sqlite-vec virtual table holding the embeddings; created lazily at the embedding dimension read from the first response. The dimension is persisted in a small key/value `meta` table so the vector table can be reconstructed on reopen; a mismatched dimension on insert is an error.
 
-- Atomic write-to-temp-then-rename to avoid partial reads
-- Read returns None if file does not exist
-- Delete is idempotent (succeeds if file already gone)
-- `rel_path` is derived by the caller (FileOp Actor), not by Storage
+Search is hybrid (sqlite-vec cosine + FTS5 BM25), scoped to `(username, agent_id)` by path-prefix match, returning `path`, `start_line`, `end_line`, `score`, `snippet`. Chunking is ~400 tokens with 80-token overlap.
 
-Files on disk are **plain Markdown with no frontmatter**.
+## Errors
 
-### Filesystem Layout
-
-All memory files are stored under the configured `memory_dir` root using this path formula:
-
-- `{memory_dir}/{username}/{agent_id}/{flattened_filename}`
-
-Where:
-
-- `username` — the OpenClaw user who owns the memory
-- `agent_id` — UUID of the agent that produced it
-- `flattened_filename` — the original filename with every `/` and `\` replaced by `_` (so `notes/2026-03-31.md` becomes `notes_2026-03-31.md`). The agent is responsible for encoding any logical sub-path into this single name; the memory manager does not interpret it.
-
-Synthesized files produced by the Synthesizer live in dated files under `_synthesized` directories at two levels (see [Synthesized output files](#synthesized-output-files) for naming and size-cap rules):
-
-- **Per-user synthesis:** `{memory_dir}/{username}/_synthesized/{date}[-{n}].md`
-- **General (cross-user) synthesis:** `{memory_dir}/_synthesized/{date}[-{n}].md`
-
-The `_synthesized` directory distinguishes synthesized output from raw agent memories at both levels.
-
-The `rel_path` passed to Storage messages is always relative to `memory_dir`. Path derivation is the caller's responsibility (FileOp Actor for raw memories, Synthesizer for synthesized files).
-
-## Index Actor
-
-SQLite-based metadata, vector, and keyword index. Follows OpenClaw's schema.
-
-### Tables
-
-**files** — tracks indexed files for change detection:
-
-| Column     | Type             | Notes                               |
-| ---------- | ---------------- | ----------------------------------- |
-| path       | TEXT PRIMARY KEY | Relative file path                  |
-| source     | TEXT NOT NULL    | 'raw' or 'synthesized'              |
-| size       | INTEGER NOT NULL | File size in bytes                  |
-| updated_at | INTEGER NOT NULL | Unix timestamp of last index update |
-
-**chunks** — indexed text chunks with line numbers:
-
-| Column     | Type             | Notes                                                    |
-| ---------- | ---------------- | -------------------------------------------------------- |
-| id         | TEXT PRIMARY KEY | `{path}:{chunk_index}`                                   |
-| path       | TEXT NOT NULL    | Relative file path (FK to files.path, manually cascaded) |
-| start_line | INTEGER NOT NULL | 1-indexed line number in original file                   |
-| end_line   | INTEGER NOT NULL | 1-indexed line number in original file                   |
-| model      | TEXT NOT NULL    | Embedding model name                                     |
-| text       | TEXT NOT NULL    | Actual chunk content                                     |
-| updated_at | INTEGER NOT NULL | Unix timestamp                                           |
-
-Chunk ID = `{path}:{chunk_index}` where `chunk_index` is 0-based sequential. Insert always deletes all existing chunks for a path before re-inserting, so stable IDs are not needed.
-
-Embeddings are stored only in `chunks_vec`, not duplicated in this table.
-
-**chunks_fts** — FTS5 virtual table for keyword search:
-
-- Indexed column: `text`
-- Unindexed: id, path, model, start_line, end_line
-- Tokenizer: `unicode61`
-
-**chunks_vec** — sqlite-vec virtual table for vector search:
-
-- `chunk_id` (PRIMARY KEY) + `embedding` (FLOAT32[dim])
-- Created lazily on first insert via `EnsureVecReady { dim }`; `dim` is read from the embedding response.
-
-**meta** — key/value table for runtime invariants:
-
-| Column | Type             | Notes                  |
-| ------ | ---------------- | ---------------------- |
-| key    | TEXT PRIMARY KEY | e.g. `"embedding_dim"` |
-| value  | TEXT NOT NULL    | Stringified value      |
-
-Stores `embedding_dim` so the `chunks_vec` virtual table can be reconstructed on reopen at the same dimension. A mismatched dimension on insert surfaces as `IndexError::DimensionMismatch`.
-
-### Search
-
-Hybrid search combining:
-
-- **Vector search:** cosine distance via sqlite-vec
-- **Keyword search:** BM25 via FTS5
-
-Results scoped to (username, agent_id) via path-prefix matching (e.g. `path LIKE '{username}/{agent_id}/%'`). Returned as:
-
-```
-SearchResult {
-    path: String,
-    start_line: u32,
-    end_line: u32,
-    score: f32,
-    snippet: String,
-}
-```
-
-## Synthesizer Actor
-
-Long-lived child of Memory Manager. FileChanged messages from FileOp Actor accumulate into a pending set, batched by a configurable cool-down timer; on expiry it runs the two-pass synthesis described under [Pipelines → Synthesizer](#synthesizer). It reads changed files and prior summaries from Storage, delegates the synthesis itself to LLM Service via `Synthesize`, and writes the results back through Storage and Index. Prompt engineering and conversation context live in LLM Service, not here.
-
-## Error Types
-
-Per-module error types. No `anyhow` in library code — only in `main.rs`.
-
-| Error Type     | Module              | Covers                                                                                   |
-| -------------- | ------------------- | ---------------------------------------------------------------------------------------- |
-| `StorageError` | `memory/storage.rs` | Filesystem I/O failures (read, write, delete)                                            |
-| `IndexError`   | `memory/index.rs`   | SQLite failures (query, schema, sqlite-vec)                                              |
-| `LlmError`     | `llm.rs`            | LLM / embedding API failures                                                             |
-| `ConfigError`  | `error.rs`          | Config loading and parsing failures                                                      |
-| `MemoryError`  | `memory/error.rs`   | Top-level error for MemoryManager; wraps Storage, Index, and LLM errors via `From` impls |
-
-**Message result types use specific errors:**
-
-- Storage messages (`StorageWrite`, `StorageRead`, `StorageDelete`) → `Result<_, StorageError>`
-- Index messages (`IndexInsert`, `IndexDelete`, `IndexSearch`, `EnsureVecReady`) → `Result<_, IndexError>`
-- External messages (`FileOpWrite`, `FileOpRead`, `FileOpDelete`, `Search`) → `Result<_, MemoryError>`
-- `LlmService` messages (`Embed`, `Synthesize`) → `Result<_, LlmError>`
-
-`MemoryError` converts from child errors automatically via `From` impls, so `?` works naturally in MemoryManager handlers.
+Per-module error types, no `anyhow` in library code (only `main.rs`). `StorageError`, `IndexError`, and `MemoryError` live together in `memory/error.rs`; `ConfigError` in `error.rs`; `LlmError` in `llm/error.rs`. `MemoryError` is the top-level type for the Memory Manager and converts from the child errors via `From`, so `?` composes naturally; the per-message reply types use the specific child error.

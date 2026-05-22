@@ -22,12 +22,27 @@ pub struct OpenAiProvider {
 }
 
 impl OpenAiProvider {
-    pub fn new(config: &LlmConfig) -> Result<Self, LlmError> {
-        let api_key = std::env::var(&config.api_key_env).map_err(|_| {
-            LlmError::Config(format!(
-                "environment variable {} is not set",
-                config.api_key_env
-            ))
+    /// Construct for the **chat** role: reads `api_key_env` and `base_url`.
+    /// Used when OpenAI is the chat provider, and when it serves both roles
+    /// (in which case it is treated as a chat provider).
+    pub fn new_chat(config: &LlmConfig) -> Result<Self, LlmError> {
+        Self::from_parts(config, &config.api_key_env, &config.base_url)
+    }
+
+    /// Construct for the **embedding** role: reads `embedding_api_key_env` and
+    /// `embedding_base_url`. Used when OpenAI is the embedding provider while a
+    /// different vendor (e.g. DeepSeek) handles chat.
+    pub fn new_embedding(config: &LlmConfig) -> Result<Self, LlmError> {
+        Self::from_parts(
+            config,
+            &config.embedding_api_key_env,
+            &config.embedding_base_url,
+        )
+    }
+
+    fn from_parts(config: &LlmConfig, api_key_env: &str, base_url: &str) -> Result<Self, LlmError> {
+        let api_key = std::env::var(api_key_env).map_err(|_| {
+            LlmError::Config(format!("environment variable {} is not set", api_key_env))
         })?;
         let http = Client::builder()
             .timeout(Duration::from_secs(config.request_timeout_secs))
@@ -38,7 +53,7 @@ impl OpenAiProvider {
 
         Ok(Self {
             http,
-            base_url: config.base_url.clone(),
+            base_url: base_url.to_string(),
             api_key,
             chat_model: config.model.clone(),
             embedding_model: config.embedding_model.clone(),
@@ -259,7 +274,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let p = OpenAiProvider::new(&config_for(&server)).unwrap();
+        let p = OpenAiProvider::new_embedding(&config_for(&server)).unwrap();
         let out = p.embed(&["a".to_string(), "b".to_string()]).await.unwrap();
 
         assert_eq!(out.model, "text-embedding-3-small");
@@ -279,7 +294,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let p = OpenAiProvider::new(&config_for(&server)).unwrap();
+        let p = OpenAiProvider::new_chat(&config_for(&server)).unwrap();
         let out = p
             .chat(&[ChatMessage {
                 role: Role::User,
@@ -299,7 +314,32 @@ mod tests {
             api_key_env: "OPENAI_API_KEY_MISSING".into(),
             ..LlmConfig::default()
         };
-        let err = OpenAiProvider::new(&cfg).map(|_| ()).unwrap_err();
+        let err = OpenAiProvider::new_chat(&cfg).map(|_| ()).unwrap_err();
         assert!(matches!(err, LlmError::Config(_)));
+    }
+
+    /// The chat role reads `api_key_env` / `base_url`; the embedding role reads
+    /// `embedding_api_key_env` / `embedding_base_url`. The two must not be crossed.
+    #[tokio::test]
+    async fn roles_read_their_own_env_and_base_url() {
+        unsafe {
+            std::env::set_var("CHAT_KEY", "chat-key");
+            std::env::set_var("EMBED_KEY", "embed-key");
+        }
+        let cfg = LlmConfig {
+            api_key_env: "CHAT_KEY".into(),
+            embedding_api_key_env: "EMBED_KEY".into(),
+            base_url: "https://chat.example".into(),
+            embedding_base_url: "https://embed.example".into(),
+            ..LlmConfig::default()
+        };
+
+        let chat = OpenAiProvider::new_chat(&cfg).unwrap();
+        assert_eq!(chat.api_key, "chat-key");
+        assert_eq!(chat.base_url, "https://chat.example");
+
+        let embed = OpenAiProvider::new_embedding(&cfg).unwrap();
+        assert_eq!(embed.api_key, "embed-key");
+        assert_eq!(embed.base_url, "https://embed.example");
     }
 }

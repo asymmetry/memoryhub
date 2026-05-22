@@ -1,0 +1,3 @@
+[default.extend-words]
+# "unparseable" is an accepted variant spelling; keep it as-is.
+unparseable = "unparseable"

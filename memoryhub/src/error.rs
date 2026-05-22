@@ -26,6 +26,9 @@ pub enum ConfigError {
         source: Box<toml::de::Error>,
     },
 
+    #[error("config file {} does not exist", path.display())]
+    Missing { path: PathBuf },
+
     #[error("could not determine home directory")]
     NoHomeDir,
 }

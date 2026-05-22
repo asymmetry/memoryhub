@@ -179,20 +179,26 @@ impl Handler<SynthesisTaskTerminated> for LlmService {
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
+
     use super::*;
 
-    fn cfg() -> LlmConfig {
+    fn cfg(prompts_dir: &Path) -> LlmConfig {
         LlmConfig {
             provider: "mock".to_string(),
             embedding_provider: "mock".to_string(),
             synthesis_idle_timeout_secs: 60,
+            prompts_dir: prompts_dir.to_path_buf(),
             ..LlmConfig::default()
         }
     }
 
     #[tokio::test]
     async fn synthesize_spawns_task_and_returns_reply() {
-        let (addr, _h) = LlmService::new(cfg()).start("llm-test").unwrap();
+        let prompts = tempfile::tempdir().unwrap();
+        let (addr, _h) = LlmService::new(cfg(prompts.path()))
+            .start("llm-test")
+            .unwrap();
 
         let reply = addr
             .send(Synthesize {

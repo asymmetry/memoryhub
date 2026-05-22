@@ -21,7 +21,10 @@ async fn main() -> Result<()> {
     };
     tracing_subscriber::fmt().with_env_filter(filter).init();
 
-    let mut config = config::Config::load(cli.config.clone()).await?;
+    let base_dir = config::base_dir(cli.base_dir.as_deref())?;
+    info!("Using base directory {}", base_dir.display());
+
+    let mut config = config::Config::load(cli.config.clone(), &base_dir).await?;
     cli.apply_overrides(&mut config);
     info!(
         "MemoryHub starting on {}:{}",

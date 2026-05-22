@@ -1,7 +1,6 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
-use tracing::warn;
 
 /// LLM / embedding provider settings.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -48,19 +47,9 @@ pub struct LlmConfig {
     pub embedding_base_url: String,
 }
 
-/// Default prompts directory: `~/.memoryhub/prompts`.
+/// Default prompts directory, relative to the base directory: `prompts`.
 fn default_prompts_dir() -> PathBuf {
-    match dirs::home_dir() {
-        Some(home) => home.join(".memoryhub").join("prompts"),
-        None => {
-            let fallback = std::env::temp_dir().join("memoryhub").join("prompts");
-            warn!(
-                "Could not resolve home directory; using temp dir for prompts: {}",
-                fallback.display()
-            );
-            fallback
-        }
-    }
+    PathBuf::from("prompts")
 }
 
 const fn default_synthesis_idle_timeout_secs() -> u64 {
@@ -85,6 +74,16 @@ fn default_base_url() -> String {
 
 fn default_embedding_base_url() -> String {
     "https://api.openai.com/v1".to_string()
+}
+
+impl LlmConfig {
+    /// Resolves `prompts_dir` against the base directory: an absolute path is
+    /// left unchanged, a relative one is joined onto `base`.
+    pub fn resolve_paths(&mut self, base: &Path) {
+        if self.prompts_dir.is_relative() {
+            self.prompts_dir = base.join(&self.prompts_dir);
+        }
+    }
 }
 
 impl Default for LlmConfig {
@@ -122,15 +121,34 @@ mod tests {
         assert_eq!(c.max_retries, default_max_retries());
         assert_eq!(c.request_timeout_secs, default_request_timeout_secs());
         assert_eq!(c.base_url, default_base_url());
-        assert!(
-            c.prompts_dir.ends_with(".memoryhub/prompts"),
-            "expected default prompts_dir to end with .memoryhub/prompts, got {:?}",
-            c.prompts_dir
-        );
+        assert_eq!(c.prompts_dir, PathBuf::from("prompts"));
         assert_eq!(
             c.synthesis_context_max_chars,
             default_synthesis_context_max_chars()
         );
+    }
+
+    #[test]
+    fn resolve_paths_joins_relative_prompts_dir_onto_base() {
+        let base = Path::new("/data/mh");
+        let mut c = LlmConfig::default();
+        c.resolve_paths(base);
+        assert_eq!(c.prompts_dir, base.join("prompts"));
+    }
+
+    #[test]
+    fn resolve_paths_leaves_absolute_prompts_dir_unchanged() {
+        let abs = if cfg!(windows) {
+            PathBuf::from("C:\\custom\\prompts")
+        } else {
+            PathBuf::from("/custom/prompts")
+        };
+        let mut c = LlmConfig {
+            prompts_dir: abs.clone(),
+            ..LlmConfig::default()
+        };
+        c.resolve_paths(Path::new("/data/mh"));
+        assert_eq!(c.prompts_dir, abs);
     }
 
     #[test]
@@ -149,11 +167,7 @@ embedding_model = "text-embedding-3-small"
             c.synthesis_idle_timeout_secs,
             default_synthesis_idle_timeout_secs()
         );
-        assert!(
-            c.prompts_dir.ends_with(".memoryhub/prompts"),
-            "expected default prompts_dir to end with .memoryhub/prompts, got {:?}",
-            c.prompts_dir
-        );
+        assert_eq!(c.prompts_dir, PathBuf::from("prompts"));
         assert_eq!(
             c.synthesis_context_max_chars,
             default_synthesis_context_max_chars()

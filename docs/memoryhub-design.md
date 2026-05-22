@@ -42,14 +42,36 @@ The binary parses its arguments with `clap` (derive) before starting. There are 
 
 | Flag                  | Effect                                                                 |
 | --------------------- | ---------------------------------------------------------------------- |
-| `-c`, `--config PATH` | Config file to load. Defaults to `~/.memoryhub/config.toml`.           |
+| `--base-dir PATH`     | Root directory for all MemoryHub data. See "Base directory" below.     |
+| `-c`, `--config PATH` | Config file to load. Defaults to `{base}/config.toml`.                 |
 | `--host HOST`         | Override `server.host` after the config is loaded.                     |
 | `--port PORT`         | Override `server.port` after the config is loaded.                     |
 | `--log-level FILTER`  | Tracing filter (e.g. `info`, `memoryhub=debug`); overrides `RUST_LOG`. |
 | `--version`, `--help` | Provided automatically by `clap`.                                      |
 
-**Config-path semantics.** `Config::load` takes the chosen path. With `--config` the named file _must_ exist — a missing file is an error, since the operator asked for it explicitly. Without the flag, the default path is read, falling back to built-in defaults (with a warning) when absent — the current behavior.
+**Config-path semantics.** `Config::load` takes the chosen path. With `--config` the named file _must_ exist — a missing file is an error, since the operator asked for it explicitly. Without the flag, the default path (`{base}/config.toml`) is read, falling back to built-in defaults (with a warning) when absent — the current behavior.
 
 **Override precedence.** `main` loads the config, then calls `cli.apply_overrides(&mut config)`, which writes `--host`/`--port` into `config.server` only when present. So precedence is: CLI flag > config file > built-in default.
 
 **Logging.** The `EnvFilter` is built from `--log-level` when given, otherwise from `RUST_LOG` via `from_default_env()`.
+
+## Base directory
+
+All on-disk state lives under a single base directory, resolved by `config::base_dir` with this precedence:
+
+```
+--base-dir flag  >  $MEMORYHUB_HOME  >  ~/.memoryhub
+```
+
+The base dir is established before the config file is read (the default config path derives from it), so it cannot live in the config file itself. When `--base-dir` or `MEMORYHUB_HOME` is set, no home directory is required — this is the primary deployment knob for the Docker image, where `MEMORYHUB_HOME` points at a mounted volume.
+
+The four data paths default to names relative to the base dir, so the effective defaults are unchanged when the base is `~/.memoryhub`:
+
+| Setting             | Default (relative) | Resolves to             |
+| ------------------- | ------------------ | ----------------------- |
+| config file         | `config.toml`      | `{base}/config.toml`    |
+| `memory.memory_dir` | `memory`           | `{base}/memory`         |
+| `memory.db_path`    | `memoryhub.db`     | `{base}/memoryhub.db`   |
+| `llm.prompts_dir`   | `prompts`          | `{base}/prompts`        |
+
+**Path resolution** (`MemoryConfig::resolve_paths` and `LlmConfig::resolve_paths`, both taking the base dir): the SQLite `:memory:` sentinel and absolute paths are left untouched; a `~/…` prefix expands to the home directory (kept for back-compat); any other relative path is joined onto the base dir.

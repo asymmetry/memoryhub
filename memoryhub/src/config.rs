@@ -18,15 +18,29 @@ pub struct Config {
     pub llm: LlmConfig,
 }
 
-/// Returns the base directory for MemoryHub data: `~/.memoryhub`.
-pub fn base_dir() -> Result<PathBuf, ConfigError> {
+/// Name of the environment variable holding the base directory override.
+pub const BASE_DIR_ENV: &str = "MEMORYHUB_HOME";
+
+/// Resolves the base directory for all MemoryHub data.
+///
+/// Precedence: the `override_dir` argument (the `--base-dir` flag) > the
+/// `MEMORYHUB_HOME` environment variable > `~/.memoryhub`. A home directory is
+/// only required for the final fallback, so a container can run without one by
+/// setting `MEMORYHUB_HOME`.
+pub fn base_dir(override_dir: Option<&Path>) -> Result<PathBuf, ConfigError> {
+    if let Some(dir) = override_dir {
+        return Ok(dir.to_path_buf());
+    }
+    if let Some(dir) = std::env::var_os(BASE_DIR_ENV).filter(|v| !v.is_empty()) {
+        return Ok(PathBuf::from(dir));
+    }
     let home = dirs::home_dir().ok_or(ConfigError::NoHomeDir)?;
     Ok(home.join(".memoryhub"))
 }
 
-/// Returns the default config file path: `~/.memoryhub/config.toml`.
-pub fn config_path() -> Result<PathBuf, ConfigError> {
-    Ok(base_dir()?.join("config.toml"))
+/// Returns the default config file path: `{base}/config.toml`.
+pub fn config_path(base: &Path) -> PathBuf {
+    base.join("config.toml")
 }
 
 impl Config {
@@ -47,12 +61,12 @@ impl Config {
         Ok(config)
     }
 
-    /// Loads configuration from `path`, or from the default `~/.memoryhub/config.toml`
-    /// when `path` is `None`.
+    /// Loads configuration from `path`, or from the default `{base_dir}/config.toml`
+    /// when `path` is `None`, then resolves all data paths against `base_dir`.
     ///
     /// An explicit `path` that does not exist is an error. The default path is allowed
     /// to be missing, in which case built-in defaults are used (with a warning).
-    pub async fn load(path: Option<PathBuf>) -> Result<Self, ConfigError> {
+    pub async fn load(path: Option<PathBuf>, base_dir: &Path) -> Result<Self, ConfigError> {
         let mut config = match path {
             Some(path) => {
                 if !path.exists() {
@@ -61,23 +75,27 @@ impl Config {
                 Self::from_file(path).await?
             }
             None => {
-                let path = config_path()?;
+                let path = config_path(base_dir);
                 if path.exists() {
                     Self::from_file(path).await?
                 } else {
-                    tracing::warn!("~/.memoryhub/config.toml not found — using built-in defaults");
+                    tracing::warn!(
+                        "{} not found — using built-in defaults",
+                        config_path(base_dir).display()
+                    );
                     Self::default()
                 }
             }
         };
-        config.memory.resolve_paths()?;
+        config.memory.resolve_paths(base_dir)?;
+        config.llm.resolve_paths(base_dir);
         Ok(config)
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
 
     use super::*;
 
@@ -105,13 +123,19 @@ mod tests {
 
     #[tokio::test]
     async fn test_load_explicit_missing_path_errors() {
-        let result = Config::load(Some(PathBuf::from("definitely-not-here.toml"))).await;
+        let result = Config::load(
+            Some(PathBuf::from("definitely-not-here.toml")),
+            Path::new("."),
+        )
+        .await;
         assert!(matches!(result, Err(ConfigError::Missing { .. })));
     }
 
     #[tokio::test]
     async fn test_load_explicit_path() {
-        let config = Config::load(Some(test_config_path())).await.unwrap();
+        let config = Config::load(Some(test_config_path()), Path::new("."))
+            .await
+            .unwrap();
         assert_eq!(config.server.port, 9090);
     }
 
@@ -120,8 +144,8 @@ mod tests {
         let config = Config::default();
         assert_eq!(config.server.host, "0.0.0.0");
         assert_eq!(config.server.port, 8080);
-        assert_eq!(config.memory.memory_dir, "~/.memoryhub/memory");
-        assert_eq!(config.memory.db_path, "~/.memoryhub/memoryhub.db");
+        assert_eq!(config.memory.memory_dir, "memory");
+        assert_eq!(config.memory.db_path, "memoryhub.db");
         assert_eq!(config.memory.chunk_size, 400);
         assert_eq!(config.memory.chunk_overlap, 80);
         assert_eq!(config.llm.provider, "deepseek");
@@ -136,28 +160,36 @@ host = "localhost"
 "#;
         let config: Config = toml::from_str(toml).unwrap();
         assert_eq!(config.server.port, 3000);
-        assert_eq!(config.memory.memory_dir, "~/.memoryhub/memory");
+        assert_eq!(config.memory.memory_dir, "memory");
         assert_eq!(config.memory.chunk_size, 400);
     }
 
     #[test]
-    fn test_base_dir() {
-        let dir = base_dir().unwrap();
-        assert!(dir.ends_with(".memoryhub"));
+    fn test_base_dir_flag_override_wins() {
+        let dir = base_dir(Some(Path::new("/data/mh"))).unwrap();
+        assert_eq!(dir, PathBuf::from("/data/mh"));
     }
 
     #[test]
-    fn test_config_path_ends_with_toml() {
-        let path = config_path().unwrap();
-        assert_eq!(path.file_name().unwrap(), "config.toml");
-        assert!(path.parent().unwrap().ends_with(".memoryhub"));
+    fn test_base_dir_default_ends_with_memoryhub() {
+        // No flag override; without MEMORYHUB_HOME set this falls back to the home dir.
+        if std::env::var_os(BASE_DIR_ENV).is_none() {
+            let dir = base_dir(None).unwrap();
+            assert!(dir.ends_with(".memoryhub"));
+        }
+    }
+
+    #[test]
+    fn test_config_path_joins_base() {
+        let path = config_path(Path::new("/data/mh"));
+        assert_eq!(path, PathBuf::from("/data/mh").join("config.toml"));
     }
 
     #[test]
     fn test_memory_config_defaults() {
         let config = Config::default();
-        assert_eq!(config.memory.memory_dir, "~/.memoryhub/memory");
-        assert_eq!(config.memory.db_path, "~/.memoryhub/memoryhub.db");
+        assert_eq!(config.memory.memory_dir, "memory");
+        assert_eq!(config.memory.db_path, "memoryhub.db");
         assert_eq!(config.memory.chunk_size, 400);
         assert_eq!(config.memory.chunk_overlap, 80);
         assert_eq!(config.memory.temporal_decay_days, 30);

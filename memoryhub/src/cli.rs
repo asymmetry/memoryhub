@@ -10,7 +10,11 @@ use memoryhub::config::Config;
 #[derive(Debug, Parser)]
 #[command(version, about, long_about = None)]
 pub struct Cli {
-    /// Config file to load [default: ~/.memoryhub/config.toml]
+    /// Root directory for all data [default: $MEMORYHUB_HOME or ~/.memoryhub]
+    #[arg(long, value_name = "PATH")]
+    pub base_dir: Option<PathBuf>,
+
+    /// Config file to load [default: {base-dir}/config.toml]
     #[arg(short, long, value_name = "PATH")]
     pub config: Option<PathBuf>,
 
@@ -48,6 +52,7 @@ mod tests {
     #[test]
     fn test_defaults_are_none() {
         let cli = Cli::try_parse_from(["memoryhub"]).unwrap();
+        assert!(cli.base_dir.is_none());
         assert!(cli.config.is_none());
         assert!(cli.host.is_none());
         assert!(cli.port.is_none());
@@ -58,6 +63,8 @@ mod tests {
     fn test_flags_parse() {
         let cli = Cli::try_parse_from([
             "memoryhub",
+            "--base-dir",
+            "/data/mh",
             "--config",
             "/tmp/c.toml",
             "--host",
@@ -68,6 +75,7 @@ mod tests {
             "memoryhub=debug",
         ])
         .unwrap();
+        assert_eq!(cli.base_dir, Some(PathBuf::from("/data/mh")));
         assert_eq!(cli.config, Some(PathBuf::from("/tmp/c.toml")));
         assert_eq!(cli.host.as_deref(), Some("127.0.0.1"));
         assert_eq!(cli.port, Some(9000));

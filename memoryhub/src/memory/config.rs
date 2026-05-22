@@ -1,3 +1,5 @@
+use std::path::Path;
+
 use serde::{Deserialize, Serialize};
 
 use crate::error::ConfigError;
@@ -38,8 +40,8 @@ fn default_synthesis_max_file_bytes() -> u64 {
 impl Default for MemoryConfig {
     fn default() -> Self {
         Self {
-            memory_dir: "~/.memoryhub/memory".to_string(),
-            db_path: "~/.memoryhub/memoryhub.db".to_string(),
+            memory_dir: "memory".to_string(),
+            db_path: "memoryhub.db".to_string(),
             chunk_size: 400,
             chunk_overlap: 80,
             temporal_decay_days: 30,
@@ -51,21 +53,31 @@ impl Default for MemoryConfig {
 }
 
 impl MemoryConfig {
-    /// Expand `~` prefixes in `memory_dir` and `db_path` to the user's home directory.
-    pub fn resolve_paths(&mut self) -> Result<(), ConfigError> {
-        let home = dirs::home_dir().ok_or(ConfigError::NoHomeDir)?;
-        if self.memory_dir.starts_with("~/") {
-            self.memory_dir = home
-                .join(&self.memory_dir[2..])
-                .to_string_lossy()
-                .to_string();
-        }
-        if self.db_path.starts_with("~/") {
-            self.db_path = home.join(&self.db_path[2..]).to_string_lossy().to_string();
+    /// Resolves `memory_dir` and `db_path` against the base directory.
+    ///
+    /// The SQLite `:memory:` sentinel and absolute paths are left unchanged; a
+    /// `~/…` prefix expands to the home directory; any other relative path is
+    /// joined onto `base`.
+    pub fn resolve_paths(&mut self, base: &Path) -> Result<(), ConfigError> {
+        self.memory_dir = resolve_path(base, &self.memory_dir)?;
+        if self.db_path != ":memory:" {
+            self.db_path = resolve_path(base, &self.db_path)?;
         }
 
         Ok(())
     }
+}
+
+/// Resolves a single configured path string against the base directory.
+fn resolve_path(base: &Path, value: &str) -> Result<String, ConfigError> {
+    if let Some(rest) = value.strip_prefix("~/") {
+        let home = dirs::home_dir().ok_or(ConfigError::NoHomeDir)?;
+        return Ok(home.join(rest).to_string_lossy().to_string());
+    }
+    if Path::new(value).is_absolute() {
+        return Ok(value.to_string());
+    }
+    Ok(base.join(value).to_string_lossy().to_string())
 }
 
 #[cfg(test)]
@@ -73,20 +85,28 @@ mod tests {
     use super::*;
 
     #[test]
+    fn resolve_paths_joins_relative_defaults_onto_base() {
+        let base = Path::new("/data/mh");
+        let mut config = MemoryConfig::default();
+        config.resolve_paths(base).unwrap();
+
+        assert_eq!(config.memory_dir, base.join("memory").to_string_lossy());
+        assert_eq!(config.db_path, base.join("memoryhub.db").to_string_lossy());
+    }
+
+    #[test]
     fn resolve_paths_expands_tilde() {
         let home = dirs::home_dir().unwrap();
-        let mut config = MemoryConfig::default();
-        config.resolve_paths().unwrap();
+        let mut config = MemoryConfig {
+            memory_dir: "~/mem".to_string(),
+            db_path: "~/mh.db".to_string(),
+            ..MemoryConfig::default()
+        };
+        config.resolve_paths(Path::new("/data/mh")).unwrap();
 
         assert!(!config.memory_dir.starts_with("~/"));
-        assert!(!config.db_path.starts_with("~/"));
-        assert!(
-            config
-                .memory_dir
-                .starts_with(home.to_string_lossy().as_ref())
-        );
-        assert!(config.memory_dir.ends_with(".memoryhub/memory"));
-        assert!(config.db_path.ends_with(".memoryhub/memoryhub.db"));
+        assert_eq!(config.memory_dir, home.join("mem").to_string_lossy());
+        assert_eq!(config.db_path, home.join("mh.db").to_string_lossy());
     }
 
     #[test]
@@ -97,14 +117,30 @@ mod tests {
 
     #[test]
     fn resolve_paths_leaves_absolute_paths_unchanged() {
+        let (mem, db) = if cfg!(windows) {
+            ("C:\\tmp\\memory", "C:\\tmp\\test.db")
+        } else {
+            ("/tmp/memory", "/tmp/test.db")
+        };
         let mut config = MemoryConfig {
-            memory_dir: "/tmp/memory".to_string(),
-            db_path: "/tmp/test.db".to_string(),
+            memory_dir: mem.to_string(),
+            db_path: db.to_string(),
             ..MemoryConfig::default()
         };
-        config.resolve_paths().unwrap();
+        config.resolve_paths(Path::new("/data/mh")).unwrap();
 
-        assert_eq!(config.memory_dir, "/tmp/memory");
-        assert_eq!(config.db_path, "/tmp/test.db");
+        assert_eq!(config.memory_dir, mem);
+        assert_eq!(config.db_path, db);
+    }
+
+    #[test]
+    fn resolve_paths_leaves_in_memory_db_unchanged() {
+        let mut config = MemoryConfig {
+            db_path: ":memory:".to_string(),
+            ..MemoryConfig::default()
+        };
+        config.resolve_paths(Path::new("/data/mh")).unwrap();
+
+        assert_eq!(config.db_path, ":memory:");
     }
 }

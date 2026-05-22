@@ -2,17 +2,27 @@ use std::time::Duration;
 
 use acktor::{Actor, ErrorReport, Signal};
 use anyhow::Result;
+use clap::Parser;
 use tracing::{info, warn};
+use tracing_subscriber::EnvFilter;
 
 use memoryhub::{MemoryHub, config};
 
+mod cli;
+use cli::Cli;
+
 #[tokio::main]
 async fn main() -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
-        .init();
+    let cli = Cli::parse();
 
-    let config = config::Config::load().await?;
+    let filter = match &cli.log_level {
+        Some(level) => EnvFilter::try_new(level)?,
+        None => EnvFilter::from_default_env(),
+    };
+    tracing_subscriber::fmt().with_env_filter(filter).init();
+
+    let mut config = config::Config::load(cli.config.clone()).await?;
+    cli.apply_overrides(&mut config);
     info!(
         "MemoryHub starting on {}:{}",
         config.server.host, config.server.port

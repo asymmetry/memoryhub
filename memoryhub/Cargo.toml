@@ -22,6 +22,7 @@ ahash.workspace = true
 anyhow.workspace = true
 axum.workspace = true
 chrono.workspace = true
+clap.workspace = true
 dirs.workspace = true
 rand.workspace = true
 reqwest = { workspace = true, features = [

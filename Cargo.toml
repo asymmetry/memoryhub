@@ -18,6 +18,7 @@ ahash = "0.8"
 anyhow = "1.0"
 axum = "0.8"
 chrono = "0.4"
+clap = { version = "4.6", features = ["derive"] }
 dirs = "6.0"
 rand = "0.10"
 reqwest = { version = "0.13", default-features = false }

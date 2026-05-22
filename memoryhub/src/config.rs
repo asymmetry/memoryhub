@@ -47,15 +47,28 @@ impl Config {
         Ok(config)
     }
 
-    /// Loads configuration from `~/.memoryhub/config.toml`, falling back to all defaults
-    /// if the file does not exist.
-    pub async fn load() -> Result<Self, ConfigError> {
-        let path = config_path()?;
-        let mut config = if path.exists() {
-            Self::from_file(path).await?
-        } else {
-            tracing::warn!("~/.memoryhub/config.toml not found — using built-in defaults");
-            Self::default()
+    /// Loads configuration from `path`, or from the default `~/.memoryhub/config.toml`
+    /// when `path` is `None`.
+    ///
+    /// An explicit `path` that does not exist is an error. The default path is allowed
+    /// to be missing, in which case built-in defaults are used (with a warning).
+    pub async fn load(path: Option<PathBuf>) -> Result<Self, ConfigError> {
+        let mut config = match path {
+            Some(path) => {
+                if !path.exists() {
+                    return Err(ConfigError::Missing { path });
+                }
+                Self::from_file(path).await?
+            }
+            None => {
+                let path = config_path()?;
+                if path.exists() {
+                    Self::from_file(path).await?
+                } else {
+                    tracing::warn!("~/.memoryhub/config.toml not found — using built-in defaults");
+                    Self::default()
+                }
+            }
         };
         config.memory.resolve_paths()?;
         Ok(config)
@@ -88,6 +101,18 @@ mod tests {
     async fn test_load_from_missing_file() {
         let result = Config::from_file("nonexistent.toml").await;
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_load_explicit_missing_path_errors() {
+        let result = Config::load(Some(PathBuf::from("definitely-not-here.toml"))).await;
+        assert!(matches!(result, Err(ConfigError::Missing { .. })));
+    }
+
+    #[tokio::test]
+    async fn test_load_explicit_path() {
+        let config = Config::load(Some(test_config_path())).await.unwrap();
+        assert_eq!(config.server.port, 9090);
     }
 
     #[test]

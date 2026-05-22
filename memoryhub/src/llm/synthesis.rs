@@ -42,7 +42,7 @@ impl SynthesisTarget {
     /// Stable actor label for this target.
     pub fn label(&self) -> String {
         match self {
-            SynthesisTarget::User(u) => format!("syn-task-{u}"),
+            SynthesisTarget::User(u) => format!("syn-task-{}", u),
             SynthesisTarget::Global => "syn-task-global".to_string(),
         }
     }
@@ -146,7 +146,7 @@ impl Handler<Synthesize> for SynthesisTask {
         {
             self.history.push(ChatMessage {
                 role: Role::User,
-                content: format!("Current summary so far:\n\n{summary}"),
+                content: format!("Current summary so far:\n\n{}", summary),
             });
         }
 

@@ -124,7 +124,7 @@ fn parse_filename(name: &str) -> Option<(String, u32)> {
     if n.is_empty() || !n.chars().all(|c| c.is_ascii_digit()) {
         return None;
     }
-    let date = format!("{y}-{m}-{d}");
+    let date = format!("{}-{}-{}", y, m, d);
     let suffix = n.parse().ok()?;
 
     Some((date, suffix))

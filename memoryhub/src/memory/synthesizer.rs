@@ -396,7 +396,8 @@ mod tests {
         let folder = dir.path().join("alice").join("_synthesized");
         assert!(
             folder.is_dir(),
-            "expected _synthesized folder at {folder:?}"
+            "expected _synthesized folder at {:?}",
+            folder
         );
         let entries: Vec<_> = std::fs::read_dir(&folder)
             .unwrap()
@@ -410,7 +411,8 @@ mod tests {
             .collect();
         assert!(
             !entries.is_empty(),
-            "expected at least one dated synthesis file in {folder:?}"
+            "expected at least one dated synthesis file in {:?}",
+            folder
         );
     }
 }

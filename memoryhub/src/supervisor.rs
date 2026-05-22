@@ -121,7 +121,7 @@ impl Handler<SupervisionEvent<MemoryManager>> for MemoryHub {
                 ctx.stop();
             }
             SupervisionEvent::Panicked(_, info) => {
-                error!("MemoryManager panicked: {info}");
+                error!("MemoryManager panicked: {}", info);
                 ctx.stop();
             }
             _ => {}
@@ -151,7 +151,7 @@ impl Handler<SupervisionEvent<LlmService>> for MemoryHub {
                 ctx.stop();
             }
             SupervisionEvent::Panicked(_, info) => {
-                error!("LlmService panicked: {info}");
+                error!("LlmService panicked: {}", info);
                 ctx.stop();
             }
             _ => {}
@@ -181,7 +181,7 @@ impl Handler<SupervisionEvent<HttpServer>> for MemoryHub {
                 ctx.stop();
             }
             SupervisionEvent::Panicked(_, info) => {
-                error!("HttpServer panicked: {info}");
+                error!("HttpServer panicked: {}", info);
                 ctx.stop();
             }
             _ => {}

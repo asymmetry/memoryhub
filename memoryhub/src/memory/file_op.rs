@@ -125,7 +125,8 @@ impl Handler<FileOpWrite> for FileOp {
         // 7. Rollback on failure.
         if let Err(e) = result {
             error!(
-                "Indexer insert for {storage_path} failed ({}); rolling back the storage write",
+                "Indexer insert for {} failed ({}); rolling back the storage write",
+                storage_path,
                 e.report()
             );
 
@@ -148,7 +149,8 @@ impl Handler<FileOpWrite> for FileOp {
             .await
         {
             warn!(
-                "Failed to notify the synthesizer about {storage_path}: {}",
+                "Failed to notify the synthesizer about {}: {}",
+                storage_path,
                 e.report()
             );
         }
@@ -217,7 +219,8 @@ impl Handler<FileOpDelete> for FileOp {
             .await
         {
             warn!(
-                "Failed to notify the synthesizer about {storage_path}: {}",
+                "Failed to notify the synthesizer about {}: {}",
+                storage_path,
                 e.report()
             );
         }

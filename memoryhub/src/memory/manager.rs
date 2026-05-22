@@ -385,7 +385,8 @@ mod tests {
         let folder = dir.path().join("alice").join("_synthesized");
         assert!(
             folder.is_dir(),
-            "expected _synthesized folder at {folder:?}"
+            "expected _synthesized folder at {:?}",
+            folder
         );
         let any_md = std::fs::read_dir(&folder)
             .unwrap()
@@ -396,6 +397,6 @@ mod tests {
                     .and_then(|n| n.to_str())
                     .is_some_and(|s| s.ends_with(".md"))
             });
-        assert!(any_md, "expected a dated synthesis file in {folder:?}");
+        assert!(any_md, "expected a dated synthesis file in {:?}", folder);
     }
 }

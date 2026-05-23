@@ -1,0 +1,10 @@
+# Build artifacts (the image builds its own; host artifacts may be Windows builds)
+target/
+**/*.rs.bk
+
+# VCS, CI, docs, and tooling — not needed to build the binary.
+.git/
+.github/
+.claude/
+docs/
+*.log

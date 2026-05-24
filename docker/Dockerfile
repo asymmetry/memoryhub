@@ -31,6 +31,5 @@ COPY --from=builder /usr/local/bin/memoryhub /usr/local/bin/memoryhub
 ENV MEMORYHUB_HOME=/data
 EXPOSE 8000
 USER memoryhub
-WORKDIR /data
 
 ENTRYPOINT ["memoryhub"]

@@ -39,3 +39,8 @@ uuid = { version = "1.23", features = ["v4", "serde"] }
 tempfile = "3.0"
 tower = "0.5"
 wiremock = "0.6"
+
+[profile.release]
+codegen-units = 1
+lto = "thin"
+strip = "debuginfo"

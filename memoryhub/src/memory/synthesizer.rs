@@ -304,6 +304,7 @@ impl Handler<FileChanged> for Synthesizer {
 
     async fn handle(&mut self, msg: FileChanged, ctx: &mut Self::Context) {
         debug_trace!("Handle command {:?}", msg);
+
         self.pending.insert(msg.rel_path);
         self.last_event = Some(Instant::now());
 
@@ -319,8 +320,9 @@ impl Handler<FileChanged> for Synthesizer {
 impl Handler<CooldownTick> for Synthesizer {
     type Result = ();
 
-    async fn handle(&mut self, msg: CooldownTick, _ctx: &mut Self::Context) {
-        debug_trace!("Handle command {:?}", msg);
+    async fn handle(&mut self, _msg: CooldownTick, _ctx: &mut Self::Context) {
+        debug_trace!("Handle command {:?}", _msg);
+
         let should_process = matches!(self.last_event, Some(t) if t.elapsed() >= self.cooldown());
         if !should_process {
             return;

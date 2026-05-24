@@ -110,7 +110,7 @@ mod tests {
         // Built-in defaults.
         let config = Config::default();
         assert_eq!(config.server.host, "0.0.0.0");
-        assert_eq!(config.server.port, 8080);
+        assert_eq!(config.server.port, 8000);
         assert_eq!(config.memory.memory_dir, "memory");
         assert_eq!(config.memory.db_path, "memoryhub.db");
         assert_eq!(config.memory.chunk_size, 400);

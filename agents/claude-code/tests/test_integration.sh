@@ -16,9 +16,22 @@ cat > "$TMP/.claude/memoryhub.json" <<EOF
 }
 EOF
 
-# Start the server
-MEMORYHUB_HOME="$TMP/mhdata" cargo run --manifest-path "$REPO_ROOT/Cargo.toml" \
-  -- --host 127.0.0.1 --port 19876 --log-level error &
+# Server config: use the mock LLM provider so no API keys are required
+mkdir -p "$TMP/mhdata"
+cat > "$TMP/mhdata/config.toml" <<EOF
+[llm]
+provider = "mock"
+embedding_provider = "mock"
+api_key_env = "UNUSED"
+embedding_api_key_env = "UNUSED"
+model = "mock"
+embedding_model = "mock"
+embedding_dim = 4
+EOF
+
+# Start the server (--features _test enables the mock LLM provider)
+MEMORYHUB_HOME="$TMP/mhdata" cargo run --manifest-path "$REPO_ROOT/memoryhub/Cargo.toml" \
+  --features _test -- --host 127.0.0.1 --port 19876 --log-level error &
 SERVER_PID=$!
 # Wait for server to be ready (up to 30s)
 for i in $(seq 1 30); do

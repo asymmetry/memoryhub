@@ -1,0 +1,9 @@
+{
+  "name": "memoryhub",
+  "version": "0.1.0",
+  "description": "Sync Claude Code memories to MemoryHub",
+  "skills": [
+    { "name": "mh-push", "path": "skills/mh-push.md" },
+    { "name": "mh-config", "path": "skills/mh-config.md" }
+  ]
+}

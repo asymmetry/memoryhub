@@ -10,7 +10,7 @@ Manual checklist to verify the plugin works end-to-end in a real Claude Code ses
 
 - [ ] Run `/mh-config` and enter the server URL and your username. Confirm the config file was written:
   ```
-  cat ~/.claude/memoryhub-config.json
+  cat ~/.claude/memoryhub.json
   ```
 
 - [ ] Confirm the hook was added to settings:

@@ -19,7 +19,7 @@ agents/claude-code/
 
 ## Config
 
-Stored at `~/.claude/memoryhub-config.json`:
+Stored at `~/.claude/memoryhub.json`:
 
 ```json
 {
@@ -33,11 +33,11 @@ Stored at `~/.claude/memoryhub-config.json`:
 
 ## Hook
 
-`PostToolUse` on `Write`, added to `~/.claude/settings.json` by `/mh-config`. Reads `file_path` from stdin JSON, silently exits if the path is not under `~/.claude/projects/*/memory/`. Always exits 0 — server outages must not interrupt the session.
+`PostToolBatch` (no matcher — fires once per resolved tool batch), added to `~/.claude/settings.json` by `/mh-config`. Reads the `tool_calls` array from stdin JSON, keeps `Write`/`Edit`/`MultiEdit` calls whose `file_path` is under `~/.claude/projects/*/memory/`, dedups them, and pushes each. Always exits 0 — server outages must not interrupt the session.
 
 ## Skills
 
-**`/mh-push`** — runs `memoryhub.py push-all --memory-dir <path>`. Claude passes the memory directory path from its context. Prints a summary on completion.
+**`/mh-push`** — runs `memoryhub.py push-all --project-dir <path>` for the current project. Claude passes the project directory from its context. Prints a summary on completion.
 
 **`/mh-config`** — runs `memoryhub.py config`. Prompts for each config field (current values as defaults), writes config, and merges the hook entry into `~/.claude/settings.json` without disturbing existing hooks.
 
@@ -45,21 +45,21 @@ Stored at `~/.claude/memoryhub-config.json`:
 
 All HTTP via stdlib `urllib`. Three subcommands:
 
-**`push-file`** — reads `file_path` from stdin JSON; checks memory dir pattern; reads file; POSTs to `/v1/memories/write`.
+**`push`** — reads the `tool_calls` array from stdin JSON; selects `Write`/`Edit`/`MultiEdit` calls with a memory-dir `file_path`, dedups them; reads each file; POSTs to `/v1/memories/write` with `filename` set to the path relative to `~/.claude/projects` (`{project_hash}/memory/...`), so memory files from different projects stay distinct.
 
-**`push-all --memory-dir <path>`** — walks the directory, calls push logic per file, prints summary.
+**`push-all --project-dir <path>`** — walks the given project dir for memory files, pushes each with the same projects-relative `filename` as `push`, prints summary.
 
 **`config`** — interactive config editor; merges hook into `~/.claude/settings.json`.
 
 ## Error Handling
 
-| Situation | Behavior |
-|---|---|
-| Config missing | Print "Run /mh-config first." and exit 0 |
-| Network / server error | Warn and continue to next file |
-| Path doesn't match memory dir | Silent exit 0 |
-| Memory dir not found | Warn and exit 0 |
-| Malformed stdin JSON | Silent exit 0 |
+| Situation                     | Behavior                                 |
+| ----------------------------- | ---------------------------------------- |
+| Config missing                | Print "Run /mh-config first." and exit 0 |
+| Network / server error        | Warn and continue to next file           |
+| Path doesn't match memory dir | Silent exit 0                            |
+| Memory dir not found          | Warn and exit 0                          |
+| Malformed stdin JSON          | Silent exit 0                            |
 
 ## Testing
 

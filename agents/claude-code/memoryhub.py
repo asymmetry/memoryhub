@@ -2,91 +2,88 @@
 
 import argparse
 import json
-import os
 import sys
 import uuid
 from pathlib import Path
 from urllib import error, request
 
-CONFIG_PATH = Path.home() / ".claude" / "memoryhub-config.json"
+CONFIG_PATH = Path.home() / ".claude" / "memoryhub.json"
 SETTINGS_PATH = Path.home() / ".claude" / "settings.json"
-HOOK_COMMAND = "python3 ~/.claude/plugins/memoryhub/memoryhub.py push-file"
+PROJECTS_DIR = Path.home() / ".claude" / "projects"
+HOOK_COMMAND = "python3 ~/.claude/plugins/memoryhub/memoryhub.py push"
+HOOK_EVENT = "PostToolBatch"
+WRITE_TOOLS = {"Write", "Edit", "MultiEdit"}
 
 
-def load_config(path=None):
+def load_config(path: Path | None = None) -> dict:
     if path is None:
-        path = Path(os.environ.get("MEMORYHUB_CONFIG_PATH", str(CONFIG_PATH)))
-    if not Path(path).exists():
+        path = CONFIG_PATH
+    if not path.exists():
         print("MemoryHub not configured. Run /mh-config first.")
         sys.exit(0)
     with open(path) as f:
         return json.load(f)
 
 
-def save_config(config, path=None):
+def save_config(config: dict, path: Path | None = None) -> None:
     if path is None:
         path = CONFIG_PATH
     with open(path, "w") as f:
         json.dump(config, f, indent=2)
 
 
-def inject_hook(settings_path=None):
-    if settings_path is None:
-        settings_path = SETTINGS_PATH
+def inject_hook(path: Path | None = None) -> None:
+    if path is None:
+        path = SETTINGS_PATH
     settings = {}
-    if Path(settings_path).exists():
+    if path.exists():
         try:
-            with open(settings_path) as f:
+            with open(path) as f:
                 settings = json.load(f)
         except json.JSONDecodeError:
-            print(f"settings.json is malformed. Fix it first: {settings_path}")
+            print(f"settings.json is malformed. Fix it first: {path}")
             sys.exit(1)
+
     hooks = settings.setdefault("hooks", {})
-    post = hooks.setdefault("PostToolUse", [])
-    # Check if already present
-    for entry in post:
-        if entry.get("matcher") == "Write":
-            for h in entry.get("hooks", []):
-                if h.get("command") == HOOK_COMMAND:
-                    return
-    # Find or create Write entry
-    write_entry = next((e for e in post if e.get("matcher") == "Write"), None)
-    if write_entry is None:
-        write_entry = {"matcher": "Write", "hooks": []}
-        post.append(write_entry)
-    write_entry["hooks"].append({"type": "command", "command": HOOK_COMMAND})
-    with open(settings_path, "w") as f:
+    batch = hooks.setdefault(HOOK_EVENT, [])
+    # PostToolBatch has no matcher; bail out if our command is already present
+    for entry in batch:
+        for h in entry.get("hooks", []):
+            if h.get("command") == HOOK_COMMAND:
+                return
+
+    if not batch:
+        batch.append({"hooks": []})
+    batch[0]["hooks"].append({"type": "command", "command": HOOK_COMMAND})
+    with open(path, "w") as f:
         json.dump(settings, f, indent=2)
 
 
-def is_memory_path(path, projects_dir=None):
-    if projects_dir is None:
-        projects_dir = Path.home() / ".claude" / "projects"
+def is_memory_path(path: Path) -> bool:
     try:
-        rel = Path(path).relative_to(projects_dir)
+        rel = path.relative_to(PROJECTS_DIR)
     except ValueError:
         return False
     parts = rel.parts
-    return len(parts) >= 3 and parts[1] == "memory" and Path(path).suffix == ".md"
+    return len(parts) >= 3 and parts[1] == "memory" and path.suffix == ".md"
 
 
-def get_filename(path, projects_dir=None):
-    if projects_dir is None:
-        projects_dir = Path.home() / ".claude" / "projects"
-    rel = Path(path).relative_to(projects_dir)
-    parts = rel.parts
-    # parts[0]=project_hash, parts[1]="memory", rest=filename
-    return str(Path(*parts[2:]))
+def get_filename(path: Path) -> str:
+    # Full path relative to ~/.claude/projects ({project_hash}/memory/...),
+    # so memory files from different projects stay distinct on the server.
+    return str(path.relative_to(PROJECTS_DIR))
 
 
-def push_single_file(config, file_path, filename=None):
+def push_one(config: dict, path: Path, filename: str | None = None) -> tuple[bool, str | None]:
     if filename is None:
-        filename = get_filename(file_path)
+        filename = get_filename(path)
+
     try:
-        with open(file_path, errors="replace") as f:
+        with open(path, errors="replace") as f:
             content = f.read()
     except OSError as e:
         return False, f"Read error: {e}"
+
     payload = json.dumps(
         {
             "username": config["username"],
@@ -95,6 +92,7 @@ def push_single_file(config, file_path, filename=None):
             "content": content,
         }
     ).encode()
+
     url = config["url"].rstrip("/") + "/v1/memories/write"
     req = request.Request(url, data=payload, headers={"Content-Type": "application/json"})
     try:
@@ -106,75 +104,102 @@ def push_single_file(config, file_path, filename=None):
         return False, f"Network error: {e.reason}"
 
 
-def cmd_push_file():
+def cmd_push() -> None:
     try:
         data = json.load(sys.stdin)
-        file_path = data.get("tool_input", {}).get("file_path", "")
+        tool_calls = data.get("tool_calls", [])
     except (json.JSONDecodeError, ValueError):
         sys.exit(0)
-    if not file_path or not is_memory_path(file_path):
+
+    # Collect unique memory files written/edited in this batch, preserving order
+    seen = set()
+    paths = []
+    for call in tool_calls:
+        if call.get("tool_name") not in WRITE_TOOLS:
+            continue
+        file_path = call.get("tool_input", {}).get("file_path", "")
+        if not file_path:
+            continue
+        path = Path(file_path)
+        if path in seen or not is_memory_path(path):
+            continue
+        seen.add(path)
+        paths.append(path)
+
+    if not paths:
         sys.exit(0)
+
     config = load_config()
-    ok, err = push_single_file(config, file_path)
-    if not ok:
-        print(f"[memoryhub] Warning: {err}", file=sys.stderr)
+
+    for path in paths:
+        ok, err = push_one(config, path)
+        if not ok:
+            print(f"[memoryhub] Warning: {err}", file=sys.stderr)
 
 
-def cmd_push_all(memory_dir):
-    config = load_config()
-    p = Path(memory_dir)
-    if not p.exists():
-        print(f"No memory directory found at {memory_dir}")
+def cmd_push_all(project_dir: Path | str) -> None:
+    path = Path(project_dir)
+    if not path.exists():
+        print(f"No project directory found at {path}")
         sys.exit(0)
-    files = sorted(p.rglob("*.md"))
+
+    files = sorted(f for f in path.rglob("*.md") if is_memory_path(f))
     if not files:
         print("No memory files found.")
         return
+
+    config = load_config()
+
     ok_count = fail_count = 0
     for f in files:
-        filename = str(f.relative_to(p))
-        success, err = push_single_file(config, f, filename=filename)
+        success, err = push_one(config, f)
         if success:
             ok_count += 1
-            print(f"  ok {f.name}")
+            print(f"  ok {get_filename(f)}")
         else:
             fail_count += 1
-            print(f"  fail {f.name}: {err}")
+            print(f"  fail {get_filename(f)}: {err}")
     print(f"\nPushed {ok_count} file(s) to MemoryHub ({fail_count} failed).")
 
 
-def cmd_config():
+def cmd_config() -> None:
     config = {}
     if CONFIG_PATH.exists():
         with open(CONFIG_PATH) as f:
             config = json.load(f)
+
     url = input(f"MemoryHub URL [{config.get('url', 'http://localhost:8000')}]: ").strip()
     config["url"] = url or config.get("url", "http://localhost:8000")
+
     username = input(f"Username [{config.get('username', '')}]: ").strip()
     config["username"] = username or config.get("username", "")
+
     if not config.get("agent_id"):
         config["agent_id"] = str(uuid.uuid4())
+
     print(f"Agent ID: {config['agent_id']}")
     save_config(config)
+
     print(f"Config saved to {CONFIG_PATH}")
     inject_hook()
+
     print(f"Hook installed in {SETTINGS_PATH}")
 
 
 def main():
     parser = argparse.ArgumentParser(prog="memoryhub")
     sub = parser.add_subparsers(dest="command")
-    sub.add_parser("push-file")
+    sub.add_parser("push")
     pa = sub.add_parser("push-all")
-    pa.add_argument("--memory-dir", required=True)
+    pa.add_argument("--project-dir", required=True)
     sub.add_parser("config")
 
     args = parser.parse_args()
 
-    if args.command == "push-file":
-        cmd_push_file()
+    if args.command == "push":
+        cmd_push()
     elif args.command == "push-all":
-        cmd_push_all(args.memory_dir)
+        cmd_push_all(args.project_dir)
     elif args.command == "config":
         cmd_config()
     else:

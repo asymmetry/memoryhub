@@ -2,12 +2,12 @@
 
 Push all memory files for the current project to MemoryHub.
 
-Run this command, substituting the actual memory directory path from your system context:
+Run this command, substituting the actual project directory from your system context:
 
 ```bash
-python3 ~/.claude/plugins/memoryhub/memoryhub.py push-all --memory-dir ~/.claude/projects/<project-dir>/memory
+python3 ~/.claude/plugins/memoryhub/memoryhub.py push-all --project-dir ~/.claude/projects/<project-dir>
 ```
 
-The project directory name is the current working directory path with `/` replaced by `-` (e.g. `/home/alice/project` → `-home-alice-project`).
+`<project-dir>` is the project folder that holds this project's memory files. Use the path already shown in your context (the directory under `~/.claude/projects` containing the `memory` folder); do not construct it by hand.
 
 Show the command output to the user.

@@ -11,7 +11,7 @@ Cargo workspace; the `memoryhub` crate lives in `memoryhub/`. Sibling top-level 
 Single Rust binary on the `acktor` actor framework (Tokio). `MemoryHub` (`memoryhub/src/supervisor.rs`) supervises three children:
 
 - `memoryhub/src/http/` — Axum REST, forwards to `MemoryManager`. Routes under `/v1/*`.
-- `memoryhub/src/memory/` — `Storage`, `Index` (SQLite + sqlite-vec + FTS5), `Synthesizer`, plus per-request `FileOp` / `SearchOp`.
+- `memoryhub/src/memory/` — `Storage`, `Indexer` (SQLite + sqlite-vec + FTS5), `Synthesizer`, plus per-request `FileOp` / `SearchOp`.
 - `memoryhub/src/llm/` — `LlmService` with `Provider` trait (deepseek / openai / mock), `Embedder`, one `SynthesisTask` per target. Templates in `memoryhub/src/llm/prompts/`.
 
 ## Conventions

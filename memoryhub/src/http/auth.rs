@@ -10,7 +10,7 @@ use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use chrono::Utc;
 use rand::RngExt;
-use rusqlite::{Connection, ErrorCode, params};
+use rusqlite::{Connection, ErrorCode, OptionalExtension, params};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
@@ -225,6 +225,117 @@ impl AuthStore {
         })
         .await?
     }
+
+    pub async fn create_token(
+        &self,
+        username: &str,
+        name: Option<&str>,
+        expires_at: Option<i64>,
+    ) -> Result<NewToken, AuthError> {
+        let conn = Arc::clone(&self.conn);
+        let username = username.to_string();
+        let name = name.map(|n| n.to_string());
+        let secret = generate_secret();
+        let token_hash = sha256_hex(&secret);
+        let id = uuid::Uuid::new_v4().to_string();
+        let id_out = id.clone();
+        tokio::task::spawn_blocking(move || {
+            let conn = conn.lock().unwrap();
+
+            // Explicit existence check so a missing user is a clean UserNotFound rather than an
+            // opaque foreign-key constraint failure.
+            let exists: bool = conn
+                .query_row(
+                    "SELECT 1 FROM users WHERE username = ?1",
+                    params![username],
+                    |_| Ok(true),
+                )
+                .optional()?
+                .unwrap_or(false);
+            if !exists {
+                return Err(AuthError::UserNotFound);
+            }
+
+            let now = Utc::now().timestamp();
+            conn.execute(
+                "INSERT INTO tokens (id, username, token_hash, name, created_at, expires_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![id, username, token_hash, name, now, expires_at],
+            )?;
+            Ok(())
+        })
+        .await??;
+
+        Ok(NewToken { id: id_out, secret })
+    }
+
+    pub async fn list_tokens(&self, username: &str) -> Result<Vec<TokenInfo>, AuthError> {
+        let conn = Arc::clone(&self.conn);
+        let username = username.to_string();
+        tokio::task::spawn_blocking(move || {
+            let conn = conn.lock().unwrap();
+            let mut stmt = conn.prepare(
+                "SELECT id, name, created_at, expires_at FROM tokens
+                 WHERE username = ?1 ORDER BY created_at",
+            )?;
+            let rows = stmt
+                .query_map(params![username], |row| {
+                    Ok(TokenInfo {
+                        id: row.get(0)?,
+                        name: row.get(1)?,
+                        created_at: row.get(2)?,
+                        expires_at: row.get(3)?,
+                    })
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(rows)
+        })
+        .await?
+    }
+
+    pub async fn revoke_token(&self, id: &str) -> Result<(), AuthError> {
+        let conn = Arc::clone(&self.conn);
+        let id = id.to_string();
+        tokio::task::spawn_blocking(move || {
+            let conn = conn.lock().unwrap();
+            let affected = conn.execute("DELETE FROM tokens WHERE id = ?1", params![id])?;
+            if affected == 0 {
+                Err(AuthError::TokenNotFound)
+            } else {
+                Ok(())
+            }
+        })
+        .await?
+    }
+
+    /// Resolves a token secret to a `Principal::User`, or `None` if unknown or expired.
+    pub async fn resolve_token(&self, secret: &str) -> Result<Option<Principal>, AuthError> {
+        let conn = Arc::clone(&self.conn);
+        let token_hash = sha256_hex(secret);
+        tokio::task::spawn_blocking(move || {
+            let conn = conn.lock().unwrap();
+            let row: Option<(String, String, Option<i64>)> = conn
+                .query_row(
+                    "SELECT t.username, u.role, t.expires_at
+                     FROM tokens t JOIN users u ON u.username = t.username
+                     WHERE t.token_hash = ?1",
+                    params![token_hash],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .optional()?;
+
+            let Some((username, role, expires_at)) = row else {
+                return Ok(None);
+            };
+            if let Some(exp) = expires_at
+                && exp < Utc::now().timestamp()
+            {
+                return Ok(None);
+            }
+            Ok(Some(Principal::User { username, role }))
+        })
+        .await?
+    }
 }
 
 #[cfg(test)]
@@ -293,5 +404,75 @@ mod tests {
         assert!(!s.has_admin().await.unwrap());
         s.create_user("bob", "admin").await.unwrap();
         assert!(s.has_admin().await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn mint_resolve_list_revoke_token() {
+        let s = store();
+        s.create_user("alice", "user").await.unwrap();
+
+        let minted = s.create_token("alice", Some("laptop"), None).await.unwrap();
+        assert!(minted.secret.starts_with("mh_"));
+
+        // Resolve the secret back to the user.
+        let principal = s.resolve_token(&minted.secret).await.unwrap();
+        assert_eq!(
+            principal,
+            Some(Principal::User {
+                username: "alice".into(),
+                role: "user".into()
+            })
+        );
+
+        // The secret is never listed; only metadata.
+        let tokens = s.list_tokens("alice").await.unwrap();
+        assert_eq!(tokens.len(), 1);
+        assert_eq!(tokens[0].id, minted.id);
+        assert_eq!(tokens[0].name.as_deref(), Some("laptop"));
+
+        // Revoke removes it.
+        s.revoke_token(&minted.id).await.unwrap();
+        assert!(s.resolve_token(&minted.secret).await.unwrap().is_none());
+        let err = s.revoke_token(&minted.id).await.unwrap_err();
+        assert!(matches!(err, AuthError::TokenNotFound));
+    }
+
+    #[tokio::test]
+    async fn unknown_and_expired_tokens_do_not_resolve() {
+        let s = store();
+        s.create_user("alice", "user").await.unwrap();
+
+        assert!(s.resolve_token("mh_nope").await.unwrap().is_none());
+
+        let past = Utc::now().timestamp() - 60;
+        let minted = s.create_token("alice", None, Some(past)).await.unwrap();
+        assert!(s.resolve_token(&minted.secret).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn token_for_missing_user_is_user_not_found() {
+        let s = store();
+        let err = s.create_token("ghost", None, None).await.unwrap_err();
+        assert!(matches!(err, AuthError::UserNotFound));
+    }
+
+    #[tokio::test]
+    async fn deleting_user_cascades_tokens() {
+        let s = store();
+        s.create_user("alice", "user").await.unwrap();
+        let minted = s.create_token("alice", None, None).await.unwrap();
+        s.delete_user("alice").await.unwrap();
+        // Cascade removed the token, so it no longer resolves.
+        assert!(s.resolve_token(&minted.secret).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn verify_root_matches_only_configured_token() {
+        let s = AuthStore::open_in_memory(Some("mh_root_secret".into())).unwrap();
+        assert!(s.verify_root("mh_root_secret"));
+        assert!(!s.verify_root("mh_wrong"));
+
+        let no_root = store();
+        assert!(!no_root.verify_root("mh_anything"));
     }
 }

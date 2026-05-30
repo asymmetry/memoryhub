@@ -1175,6 +1175,7 @@ dependencies = [
  "ahash",
  "anyhow",
  "axum",
+ "base64",
  "chrono",
  "clap",
  "dirs",

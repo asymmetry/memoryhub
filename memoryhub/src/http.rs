@@ -15,6 +15,9 @@ pub use router::build_router;
 pub mod error;
 pub use error::HttpServerError;
 
+pub mod auth;
+pub use auth::{AuthError, NewToken, Principal, TokenInfo, UserInfo};
+
 /// HTTP server bind settings.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ServerConfig {

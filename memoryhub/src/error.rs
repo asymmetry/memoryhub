@@ -7,7 +7,7 @@ use std::path::PathBuf;
 
 use thiserror::Error;
 
-pub use crate::http::HttpServerError;
+pub use crate::http::{AuthError, HttpServerError};
 pub use crate::llm::LlmError;
 pub use crate::memory::error::{IndexError, MemoryError, StorageError};
 

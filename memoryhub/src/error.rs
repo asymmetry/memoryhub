@@ -7,20 +7,20 @@ use std::path::PathBuf;
 
 use thiserror::Error;
 
-pub use crate::http::HttpServerError;
+pub use crate::http::{AuthError, HttpServerError};
 pub use crate::llm::LlmError;
 pub use crate::memory::error::{IndexError, MemoryError, StorageError};
 
 /// Errors from configuration loading.
 #[derive(Debug, Error)]
 pub enum ConfigError {
-    #[error("failed to read config file {}: {source}", path.display())]
+    #[error("could not read the config file {}", path.display())]
     Read {
         path: PathBuf,
         source: std::io::Error,
     },
 
-    #[error("failed to parse config file {}: {source}", path.display())]
+    #[error("could not parse the config file {}", path.display())]
     Parse {
         path: PathBuf,
         source: Box<toml::de::Error>,

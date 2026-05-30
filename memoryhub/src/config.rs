@@ -5,7 +5,7 @@ use tokio::fs;
 use tracing::warn;
 
 use crate::error::ConfigError;
-pub use crate::http::ServerConfig;
+pub use crate::http::{AuthConfig, ServerConfig};
 pub use crate::llm::LlmConfig;
 pub use crate::memory::MemoryConfig;
 
@@ -18,6 +18,8 @@ pub struct Config {
     pub memory: MemoryConfig,
     #[serde(default)]
     pub llm: LlmConfig,
+    #[serde(default)]
+    pub auth: AuthConfig,
 }
 
 /// Name of the environment variable holding the base directory override.
@@ -87,6 +89,8 @@ impl Config {
 
         config.memory.resolve_paths(base_dir)?;
         config.llm.resolve_paths(base_dir);
+        config.auth.resolve_paths(base_dir);
+        config.auth.apply_env();
 
         Ok(config)
     }
@@ -116,6 +120,8 @@ mod tests {
         assert_eq!(config.memory.chunk_size, 400);
         assert_eq!(config.memory.chunk_overlap, 80);
         assert_eq!(config.llm.provider, "deepseek");
+        assert_eq!(config.auth.db_path, "auth.db");
+        assert!(config.auth.admin_token.is_none());
 
         // A partial TOML overrides only what it specifies; the rest fall back to defaults.
         let toml = r#"

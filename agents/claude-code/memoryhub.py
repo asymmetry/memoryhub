@@ -86,7 +86,6 @@ def push_one(config: dict, path: Path, filename: str | None = None) -> tuple[boo
 
     payload = json.dumps(
         {
-            "username": config["username"],
             "agent_id": config["agent_id"],
             "filename": filename,
             "content": content,
@@ -94,7 +93,11 @@ def push_one(config: dict, path: Path, filename: str | None = None) -> tuple[boo
     ).encode()
 
     url = config["url"].rstrip("/") + "/v1/memories/write"
-    req = request.Request(url, data=payload, headers={"Content-Type": "application/json"})
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {config['token']}",
+    }
+    req = request.Request(url, data=payload, headers=headers)
     try:
         with request.urlopen(req):
             return True, None
@@ -171,8 +174,8 @@ def cmd_config() -> None:
     url = input(f"MemoryHub URL [{config.get('url', 'http://localhost:8000')}]: ").strip()
     config["url"] = url or config.get("url", "http://localhost:8000")
 
-    username = input(f"Username [{config.get('username', '')}]: ").strip()
-    config["username"] = username or config.get("username", "")
+    token = input("MemoryHub API token (mh_...): ").strip()
+    config["token"] = token or config.get("token", "")
 
     if not config.get("agent_id"):
         config["agent_id"] = str(uuid.uuid4())

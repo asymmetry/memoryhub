@@ -128,22 +128,33 @@ from urllib.error import HTTPError, URLError
 def test_push_one_success(tmp_path):
     f = tmp_path / "test.md"
     f.write_text("hello world")
-    config = {"url": "http://localhost:8000", "username": "alice", "agent_id": "abc123"}
+    config = {"url": "http://localhost:8000", "token": "mh_tok", "agent_id": "abc123"}
     mock_resp = MagicMock()
     mock_resp.__enter__ = lambda s: s
     mock_resp.__exit__ = MagicMock(return_value=False)
+    captured = {}
+
+    def capture(req, *a, **k):
+        captured["headers"] = req.headers
+        captured["payload"] = json.loads(req.data)
+        return mock_resp
+
     with patch("memoryhub.get_filename", return_value="test.md"), patch(
-        "urllib.request.urlopen", return_value=mock_resp
+        "urllib.request.urlopen", side_effect=capture
     ):
         ok, err = memoryhub.push_one(config, f)
     assert ok is True
     assert err is None
+    # Identity comes from the bearer token; the body no longer carries a username.
+    assert captured["headers"]["Authorization"] == "Bearer mh_tok"
+    assert "username" not in captured["payload"]
+    assert captured["payload"]["agent_id"] == "abc123"
 
 
 def test_push_one_http_error(tmp_path):
     f = tmp_path / "test.md"
     f.write_text("hello")
-    config = {"url": "http://localhost:8000", "username": "alice", "agent_id": "abc"}
+    config = {"url": "http://localhost:8000", "token": "mh_tok", "agent_id": "abc"}
     with patch("memoryhub.get_filename", return_value="test.md"), patch(
         "urllib.request.urlopen", side_effect=HTTPError(None, 500, "Server Error", {}, None)
     ):
@@ -155,7 +166,7 @@ def test_push_one_http_error(tmp_path):
 def test_push_one_network_error(tmp_path):
     f = tmp_path / "test.md"
     f.write_text("hello")
-    config = {"url": "http://localhost:8000", "username": "alice", "agent_id": "abc"}
+    config = {"url": "http://localhost:8000", "token": "mh_tok", "agent_id": "abc"}
     with patch("memoryhub.get_filename", return_value="test.md"), patch(
         "urllib.request.urlopen", side_effect=URLError("connection refused")
     ):
@@ -250,7 +261,7 @@ def test_cmd_push_all_sends_projects_relative_filename(tmp_path, monkeypatch):
     project_dir = projects / "h"
     (project_dir / "memory").mkdir(parents=True)
     (project_dir / "memory" / "user_role.md").write_text("content")
-    config = {"url": "http://localhost:8000", "username": "alice", "agent_id": "abc"}
+    config = {"url": "http://localhost:8000", "token": "mh_tok", "agent_id": "abc"}
     pushed_filenames = []
     mock_resp = MagicMock()
     mock_resp.__enter__ = lambda s: s
@@ -273,14 +284,14 @@ def test_cmd_push_all_sends_projects_relative_filename(tmp_path, monkeypatch):
 def test_cmd_config_writes_config_and_injects_hook(tmp_path, monkeypatch):
     cfg_path = tmp_path / "config.json"
     monkeypatch.setattr("memoryhub.CONFIG_PATH", cfg_path)
-    with patch("builtins.input", side_effect=["http://localhost:8000", "alice"]), patch(
+    with patch("builtins.input", side_effect=["http://localhost:8000", "mh_tok"]), patch(
         "memoryhub.inject_hook"
     ) as mock_inject, patch("memoryhub.save_config") as mock_save, patch("builtins.print"):
         memoryhub.cmd_config()
     assert mock_save.called
     saved_config = mock_save.call_args[0][0]
     assert saved_config["url"] == "http://localhost:8000"
-    assert saved_config["username"] == "alice"
+    assert saved_config["token"] == "mh_tok"
     assert len(saved_config["agent_id"]) == 36  # UUID
     mock_inject.assert_called_once()
 

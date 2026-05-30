@@ -8,7 +8,7 @@ Manual checklist to verify the plugin works end-to-end in a real Claude Code ses
 
 ## Steps
 
-- [ ] Run `/mh-config` and enter the server URL and your username. Confirm the config file was written:
+- [ ] Run `/mh-config` and enter the server URL and your API token (`mh_...`, minted by an admin via `POST /v1/admin/users/<username>/tokens`). Confirm the config file was written:
   ```
   cat ~/.claude/memoryhub.json
   ```
@@ -23,8 +23,9 @@ Manual checklist to verify the plugin works end-to-end in a real Claude Code ses
 - [ ] Confirm the file appeared in MemoryHub:
   ```
   curl -s -X POST http://localhost:8000/v1/memories/read \
+    -H "Authorization: Bearer <your-token>" \
     -H "Content-Type: application/json" \
-    -d '{"username":"<your-username>","agent_id":"<your-agent-id>","filename":"<memory-file-name>"}'
+    -d '{"agent_id":"<your-agent-id>","filename":"<memory-file-name>"}'
   ```
 
 - [ ] Run `/mh-push`. Confirm the output shows all memory files pushed with 0 failures.

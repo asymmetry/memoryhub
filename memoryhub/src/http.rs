@@ -22,6 +22,8 @@ pub use auth::{AuthError, AuthStore, NewToken, Principal, TokenInfo, UserInfo};
 pub mod middleware;
 pub use middleware::{AdminPrincipal, AuthUser, auth_middleware};
 
+pub mod admin;
+
 /// HTTP server bind settings.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ServerConfig {

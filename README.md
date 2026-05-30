@@ -1,5 +1,11 @@
 # MemoryHub
 
+[![Crates.io](https://img.shields.io/crates/v/memoryhub)](https://crates.io/crates/memoryhub)
+[![docs.rs](https://img.shields.io/docsrs/memoryhub)](https://docs.rs/memoryhub)
+[![CI](https://github.com/asymmetry/memoryhub/actions/workflows/ci.yml/badge.svg)](https://github.com/asymmetry/memoryhub/actions/workflows/ci.yml)
+[![codecov](https://codecov.io/gh/asymmetry/memoryhub/graph/badge.svg?token=MDSTGWUBTX)](https://codecov.io/gh/asymmetry/memoryhub)
+[![License: MIT](https://img.shields.io/crates/l/memoryhub)](LICENSE)
+
 A centralized memory service for AI agents.
 
 Personal AI agents (Claude Code, etc.) each build up knowledge as local Markdown

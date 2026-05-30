@@ -30,7 +30,10 @@ An Axum `from_fn_with_state` middleware (with `HttpServerState`, so it can reach
 
 1. Read `Authorization: Bearer <secret>`; absent → **401**.
 2. If `<secret>` matches the configured root admin token (compared as SHA-256
-   digests to avoid length/early-exit leaks) → `Principal::Root`.
+   digests to avoid length/early-exit leaks) **and no admin user exists yet** →
+   `Principal::Root`. The root token is bootstrap-only: once any `admin`-role
+   user exists it is ignored (and revives automatically if every admin is later
+   removed).
 3. Else call `AuthStore::resolve_token(secret)` (SHA-256 lookup, in
    `spawn_blocking`); a hit yields `Principal::User { username, role }`, a
    miss → **401**.
@@ -126,15 +129,20 @@ admin_token = "..."       # overridden by MEMORYHUB_ADMIN_TOKEN env (preferred f
 ```
 
 The root admin token is read from `MEMORYHUB_ADMIN_TOKEN` (preferred) or
-`[auth].admin_token`. It is optional: admin routes always honor an `admin`-role
-user's token; the root token only adds a break-glass credential and is the only
-way to bootstrap a fresh deploy. If no root token is configured **and** no admin
-user exists, management is unreachable, so the server logs a startup warning;
-admin routes then simply have no caller that can satisfy `AdminPrincipal`.
-Existing user tokens in `auth.db` keep working regardless.
+`[auth].admin_token`. It is optional and **bootstrap-only**: admin routes always
+honor an `admin`-role user's token; the root token only exists to provision the
+first admin on a fresh deploy and is ignored once any admin user exists. This
+keeps the powerful, env-stored secret useful only during the bootstrap window —
+a later leak is inert. (Because the check is "no admin *exists*," deleting the
+last admin re-enables it; the uncovered case is an admin row whose tokens are
+all lost/expired, which requires DB-level recovery — the price of not treating
+root as a permanent break-glass credential.) If no root token is configured
+**and** no admin user exists, management is unreachable, so the server logs a
+startup warning. Existing user tokens in `auth.db` keep working regardless.
 
 Bootstrap: start with a root token → `POST /v1/admin/users` with `role:"admin"`
-→ mint that user a token → use the root token thereafter only as break-glass.
+→ mint that user a token → the root token is now ignored; manage with the admin
+token thereafter.
 
 ## AuthStore API
 

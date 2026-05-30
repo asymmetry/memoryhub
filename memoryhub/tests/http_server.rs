@@ -298,3 +298,32 @@ async fn admin_can_create_user_and_mint_token() {
     assert_eq!(status, StatusCode::OK);
     assert!(body.contains(r#""token":"mh_"#));
 }
+
+#[tokio::test]
+async fn root_token_stops_working_once_an_admin_is_created() {
+    let dir = tempfile::tempdir().unwrap();
+    let mm = spawn_memory_manager(dir.path()).await;
+    let store = Arc::new(AuthStore::open_in_memory(Some("mh_root".into())).unwrap());
+    let app = build_router(HttpServerState::new(mm, store));
+
+    // Bootstrap: the root token works while no admin exists.
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/admin/users")
+        .header("content-type", "application/json")
+        .header("authorization", "Bearer mh_root")
+        .body(Body::from(r#"{"username":"boss","role":"admin"}"#))
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // Now that an admin exists, the bootstrap-only root token is ignored.
+    let req = Request::builder()
+        .method("GET")
+        .uri("/v1/admin/users")
+        .header("authorization", "Bearer mh_root")
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}

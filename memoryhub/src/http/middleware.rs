@@ -42,7 +42,9 @@ pub async fn auth_middleware(
 ) -> Result<Response, HttpError> {
     let secret = bearer(req.headers()).ok_or(HttpError::Unauthorized)?;
 
-    let principal = if state.auth.verify_root(&secret) {
+    // The root token is bootstrap-only: honored only until an admin user exists, after which it
+    // is ignored (a leaked bootstrap secret becomes useless once real admins are provisioned).
+    let principal = if state.auth.verify_root(&secret) && !state.auth.has_admin().await? {
         Principal::Root
     } else {
         state
@@ -133,7 +135,7 @@ mod tests {
         next: Next,
     ) -> Result<Response, HttpError> {
         let secret = bearer(req.headers()).ok_or(HttpError::Unauthorized)?;
-        let principal = if store.verify_root(&secret) {
+        let principal = if store.verify_root(&secret) && !store.has_admin().await? {
             Principal::Root
         } else {
             store
@@ -215,17 +217,30 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn root_token_reaches_admin_but_not_user_route() {
-        let (store, _, _) = setup().await;
+    async fn root_token_reaches_admin_but_not_user_route_before_bootstrap() {
+        // No admin user exists yet, so the root token is honored.
+        let store = Arc::new(AuthStore::open_in_memory(Some("mh_root".into())).unwrap());
         let resp = app(store.clone())
             .oneshot(req("/admin", Some("mh_root")))
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
+        // Root has no memory namespace, so user-scoped routes still reject it.
         let resp = app(store)
             .oneshot(req("/user", Some("mh_root")))
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn root_token_ignored_once_an_admin_exists() {
+        // `setup()` provisions an admin user; the bootstrap-only root token is now ignored.
+        let (store, _, _) = setup().await;
+        let resp = app(store)
+            .oneshot(req("/admin", Some("mh_root")))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
     }
 }

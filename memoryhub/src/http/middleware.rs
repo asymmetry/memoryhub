@@ -4,24 +4,27 @@
 //! token to a [`Principal`] and stores it in request extensions. The [`AuthUser`] and
 //! [`AdminPrincipal`] extractors then read it.
 
-use axum::extract::{FromRequestParts, Request, State};
-use axum::http::header::AUTHORIZATION;
-use axum::http::request::Parts;
-use axum::middleware::Next;
-use axum::response::Response;
+use axum::{
+    extract::{FromRequestParts, Request, State},
+    http::{header::AUTHORIZATION, request::Parts},
+    middleware::Next,
+    response::Response,
+};
 
 use super::HttpServerState;
 use super::auth::Principal;
 use super::error::HttpError;
 
-/// An authenticated real user (never `Principal::Root`).
+/// An authenticated real user.
+///
+/// It rejects the `Root` principal.
 #[derive(Debug, Clone)]
 pub struct AuthUser {
     pub username: String,
     pub role: String,
 }
 
-/// Marker extractor that succeeds only for an admin caller (`Root` or `role == "admin"`).
+/// Marker extractor that succeeds only for an admin caller.
 #[derive(Debug, Clone)]
 pub struct AdminPrincipal;
 
@@ -50,6 +53,7 @@ pub async fn auth_middleware(
     };
 
     req.extensions_mut().insert(principal);
+
     Ok(next.run(req).await)
 }
 
@@ -92,14 +96,17 @@ where
 mod tests {
     use std::sync::Arc;
 
-    use axum::body::Body;
-    use axum::http::{Request, StatusCode};
-    use axum::routing::get;
-    use axum::{Router, middleware::from_fn_with_state};
+    use axum::{
+        Router,
+        body::Body,
+        http::{Request, StatusCode},
+        middleware::from_fn_with_state,
+        routing::get,
+    };
     use tower::ServiceExt;
 
+    use super::super::auth::AuthStore;
     use super::*;
-    use crate::http::auth::AuthStore;
 
     async fn protected_ok(_user: AuthUser) -> StatusCode {
         StatusCode::OK

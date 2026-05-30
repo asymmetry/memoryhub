@@ -14,10 +14,10 @@ mod router;
 pub use router::build_router;
 
 pub mod error;
-pub use error::HttpServerError;
+pub use error::{AuthError, HttpServerError};
 
 pub mod auth;
-pub use auth::{AuthConfig, AuthError, AuthStore, NewToken, Principal, TokenInfo, UserInfo};
+pub use auth::{AuthConfig, AuthStore, NewToken, Principal, TokenInfo, UserInfo};
 
 pub mod middleware;
 pub use middleware::{AdminPrincipal, AuthUser, auth_middleware};
@@ -103,21 +103,21 @@ impl Actor for HttpServer {
                 addr: addr_str.clone(),
                 source,
             })?;
+
         let auth_store = if self.auth_config.db_path == ":memory:" {
-            AuthStore::open_in_memory(self.auth_config.admin_token.clone())
+            AuthStore::open_in_memory(self.auth_config.admin_token.clone())?
         } else {
             AuthStore::open(
                 std::path::Path::new(&self.auth_config.db_path),
                 self.auth_config.admin_token.clone(),
-            )
-        }
-        .map_err(|source| HttpServerError::Auth { source })?;
+            )?
+        };
 
         if self.auth_config.admin_token.is_none() && !auth_store.has_admin().await.unwrap_or(false)
         {
             warn!(
-                "No root admin token configured and no admin user exists — \
-                 user/token management is unreachable until one is provisioned"
+                "User/token management is unreachable: no root admin token configured and no \
+                 admin user exists"
             );
         }
 

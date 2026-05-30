@@ -211,7 +211,7 @@ async fn search_after_write_returns_results() {
 
     let req = Request::builder()
         .method("POST")
-        .uri("/v1/search")
+        .uri("/v1/memories/search")
         .header("content-type", "application/json")
         .header("authorization", &bearer)
         .body(Body::from(format!(

@@ -97,20 +97,20 @@ All request and response bodies are JSON; all routes are nested under `/v1`.
 agent encodes any logical sub-path into the name. A read of a missing file maps
 `Ok(None)` to 404.
 
-| Visibility | Method & path | Body | Actor / reply |
-| ---------- | ------------- | ---- | ------------- |
-| Public | `GET /v1/health` | — | `{"status":"ok"}` |
-| User | `POST /v1/memories/write` | `{agent_id, filename, content}` | `FileOpWrite` → `{}` |
-| User | `POST /v1/memories/read` | `{agent_id, filename}` | `FileOpRead` → `{"content":…}` or 404 |
-| User | `POST /v1/memories/delete` | `{agent_id, filename}` | `FileOpDelete` → `{}` |
-| User | `POST /v1/search` | `{agent_id, query}` | `Search` → `{"results":[…]}` |
-| User | `GET /v1/me` | — | `{username, role}` |
-| Admin | `POST /v1/admin/users` | `{username, role}` | create user |
-| Admin | `GET /v1/admin/users` | — | `{users:[{username, role, created_at}]}` |
-| Admin | `DELETE /v1/admin/users/{username}` | — | cascades tokens |
-| Admin | `POST /v1/admin/users/{username}/tokens` | `{name?, expires_at?}` | returns `{id, token}` once |
-| Admin | `GET /v1/admin/users/{username}/tokens` | — | `{tokens:[{id, name, created_at, expires_at}]}` |
-| Admin | `DELETE /v1/admin/tokens/{id}` | — | revoke |
+| Visibility | Method & path                            | Body                            | Actor / reply                                   |
+| ---------- | ---------------------------------------- | ------------------------------- | ----------------------------------------------- |
+| Public     | `GET /v1/health`                         | —                               | `{"status":"ok"}`                               |
+| User       | `POST /v1/memories/write`                | `{agent_id, filename, content}` | `FileOpWrite` → `{}`                            |
+| User       | `POST /v1/memories/read`                 | `{agent_id, filename}`          | `FileOpRead` → `{"content":…}` or 404           |
+| User       | `POST /v1/memories/delete`               | `{agent_id, filename}`          | `FileOpDelete` → `{}`                           |
+| User       | `POST /v1/memories/search`               | `{agent_id, query}`             | `Search` → `{"results":[…]}`                    |
+| User       | `GET /v1/me`                             | —                               | `{username, role}`                              |
+| Admin      | `POST /v1/admin/users`                   | `{username, role}`              | create user                                     |
+| Admin      | `GET /v1/admin/users`                    | —                               | `{users:[{username, role, created_at}]}`        |
+| Admin      | `DELETE /v1/admin/users/{username}`      | —                               | cascades tokens                                 |
+| Admin      | `POST /v1/admin/users/{username}/tokens` | `{name?, expires_at?}`          | returns `{id, token}` once                      |
+| Admin      | `GET /v1/admin/users/{username}/tokens`  | —                               | `{tokens:[{id, name, created_at, expires_at}]}` |
+| Admin      | `DELETE /v1/admin/tokens/{id}`           | —                               | revoke                                          |
 
 The memory/search request bodies no longer carry `username` (it comes from the
 token). Token secrets are returned only by the mint endpoint and never listed.
@@ -142,15 +142,15 @@ Bootstrap: start with a root token → `POST /v1/admin/users` with `role:"admin"
 DB work in `spawn_blocking` and returns a `Future`. No actor messages or
 `Handler` impls are involved.
 
-| Method | Result |
-| ------ | ------ |
-| `resolve_token(secret)` | `Option<Principal>` |
-| `create_user(username, role)` | `Result<UserInfo, AuthError>` |
-| `list_users()` | `Result<Vec<UserInfo>, AuthError>` |
-| `delete_user(username)` | `Result<(), AuthError>` |
+| Method                                     | Result                                         |
+| ------------------------------------------ | ---------------------------------------------- |
+| `resolve_token(secret)`                    | `Option<Principal>`                            |
+| `create_user(username, role)`              | `Result<UserInfo, AuthError>`                  |
+| `list_users()`                             | `Result<Vec<UserInfo>, AuthError>`             |
+| `delete_user(username)`                    | `Result<(), AuthError>`                        |
 | `create_token(username, name, expires_at)` | `Result<NewToken, AuthError>` (`{id, secret}`) |
-| `list_tokens(username)` | `Result<Vec<TokenInfo>, AuthError>` |
-| `revoke_token(id)` | `Result<(), AuthError>` |
+| `list_tokens(username)`                    | `Result<Vec<TokenInfo>, AuthError>`            |
+| `revoke_token(id)`                         | `Result<(), AuthError>`                        |
 
 Errors are surfaced to the calling handler and logged with `e.report()`.
 
@@ -160,15 +160,15 @@ Errors are surfaced to the calling handler and logged with `e.report()`.
 shape `{"error": <code>, "message"?: <string>}`. `AuthError` (UserExists,
 UserNotFound, TokenNotFound, Db) maps into it.
 
-| Source | Status | Code | `message`? |
-| ------ | ------ | ---- | ---------- |
-| JSON deserialization failure (Axum) | 400 | — | Axum's default rejection body |
-| Missing / invalid / expired token | 401 | `unauthorized` | no |
-| Authenticated but not admin | 403 | `forbidden` | no |
-| `FileOpRead` returns `Ok(None)`, `UserNotFound`, `TokenNotFound` | 404 | `not_found` | no |
-| `UserExists` | 409 | `conflict` | no |
-| `MemoryError` / `AuthError::Db` from an actor or store call | 500 | `internal` | yes (error `Display`) |
-| Mailbox/send failure (actor dead) | 503 | `unavailable` | no |
+| Source                                                           | Status | Code           | `message`?                    |
+| ---------------------------------------------------------------- | ------ | -------------- | ----------------------------- |
+| JSON deserialization failure (Axum)                              | 400    | —              | Axum's default rejection body |
+| Missing / invalid / expired token                                | 401    | `unauthorized` | no                            |
+| Authenticated but not admin                                      | 403    | `forbidden`    | no                            |
+| `FileOpRead` returns `Ok(None)`, `UserNotFound`, `TokenNotFound` | 404    | `not_found`    | no                            |
+| `UserExists`                                                     | 409    | `conflict`     | no                            |
+| `MemoryError` / `AuthError::Db` from an actor or store call      | 500    | `internal`     | yes (error `Display`)         |
+| Mailbox/send failure (actor dead)                                | 503    | `unavailable`  | no                            |
 
 The 500 `message` is the error's `Display` form, which is user-safe by codebase
 convention — not a debug dump. 400 comes from Axum's built-in `Json` extractor

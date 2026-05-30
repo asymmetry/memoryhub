@@ -11,24 +11,45 @@ use axum::{
 use serde::Serialize;
 use thiserror::Error;
 
-use crate::http::auth::AuthError;
 use crate::memory::error::MemoryError;
 
 /// Error type returned by the [`HttpServer`][super::HttpServer] actor itself (bind/listen
 /// errors).
 #[derive(Debug, Error)]
 pub enum HttpServerError {
-    #[error("bind error on {addr}: {source}")]
-    Bind { addr: String, source: io::Error },
-
-    #[error("invalid bind address {addr}: {source}")]
+    #[error("invalid bind address {addr}")]
     InvalidAddr {
         addr: String,
         source: std::net::AddrParseError,
     },
 
-    #[error("auth store error: {source}")]
-    Auth { source: AuthError },
+    #[error("could not bind to {addr}")]
+    Bind { addr: String, source: io::Error },
+
+    #[error("could not create the auth store")]
+    Auth {
+        #[from]
+        source: AuthError,
+    },
+}
+
+/// Errors from the [`AuthStore`][super::AuthStore].
+#[derive(Debug, Error)]
+pub enum AuthError {
+    #[error("user already exists")]
+    UserExists,
+
+    #[error("user not found")]
+    UserNotFound,
+
+    #[error("token not found")]
+    TokenNotFound,
+
+    #[error(transparent)]
+    Db(#[from] rusqlite::Error),
+
+    #[error(transparent)]
+    Join(#[from] tokio::task::JoinError),
 }
 
 /// Error type returned by HTTP handlers.
@@ -61,7 +82,7 @@ impl From<AuthError> for HttpError {
         match e {
             AuthError::UserExists => HttpError::Conflict,
             AuthError::UserNotFound | AuthError::TokenNotFound => HttpError::NotFound,
-            AuthError::Db(_) | AuthError::Join(_) => HttpError::Internal(e.to_string()),
+            AuthError::Db(_) | AuthError::Join(_) => HttpError::Internal(e.report()),
         }
     }
 }

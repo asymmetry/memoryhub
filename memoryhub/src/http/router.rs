@@ -2,37 +2,36 @@ use axum::{
     Json, Router,
     extract::State,
     middleware::from_fn_with_state,
-    routing::{delete as delete_route, get, post},
+    routing::{delete, get, post},
 };
 use serde::{Deserialize, Serialize};
 use tower_http::trace::TraceLayer;
 use uuid::Uuid;
 
-use super::HttpServerState;
-use super::admin;
 use super::error::HttpError;
 use super::middleware::{AuthUser, auth_middleware};
+use super::{HttpServerState, admin};
 use crate::memory::message::{FileOpDelete, FileOpRead, FileOpWrite, Search, SearchResult};
 
 pub fn build_router(state: HttpServerState) -> Router {
     // Protected routes: everything under /v1 except /health. The middleware runs via
     // `route_layer`, which applies only to routes defined on this sub-router.
     let protected = Router::new()
-        .route("/memories/write", post(write))
-        .route("/memories/read", post(read))
-        .route("/memories/delete", post(delete))
-        .route("/search", post(search))
+        .route("/memories/write", post(write_memory))
+        .route("/memories/read", post(read_memory))
+        .route("/memories/delete", post(delete_memory))
+        .route("/memories/search", post(search_memory))
         .route("/me", get(admin::me))
         .route(
             "/admin/users",
             post(admin::create_user).get(admin::list_users),
         )
-        .route("/admin/users/{username}", delete_route(admin::delete_user))
+        .route("/admin/users/{username}", delete(admin::delete_user))
         .route(
             "/admin/users/{username}/tokens",
             post(admin::create_token).get(admin::list_tokens),
         )
-        .route("/admin/tokens/{id}", delete_route(admin::revoke_token))
+        .route("/admin/tokens/{id}", delete(admin::revoke_token))
         .route_layer(from_fn_with_state(state.clone(), auth_middleware));
 
     let v1 = Router::new().route("/health", get(health)).merge(protected);
@@ -87,7 +86,7 @@ pub async fn health() -> Json<HealthResponse> {
     Json(HealthResponse { status: "ok" })
 }
 
-pub async fn write(
+pub async fn write_memory(
     State(state): State<HttpServerState>,
     user: AuthUser,
     Json(req): Json<WriteRequest>,
@@ -108,7 +107,7 @@ pub async fn write(
     Ok(Json(serde_json::json!({})))
 }
 
-pub async fn read(
+pub async fn read_memory(
     State(state): State<HttpServerState>,
     user: AuthUser,
     Json(req): Json<ReadRequest>,
@@ -131,7 +130,7 @@ pub async fn read(
     }
 }
 
-pub async fn delete(
+pub async fn delete_memory(
     State(state): State<HttpServerState>,
     user: AuthUser,
     Json(req): Json<DeleteRequest>,
@@ -151,7 +150,7 @@ pub async fn delete(
     Ok(Json(serde_json::json!({})))
 }
 
-pub async fn search(
+pub async fn search_memory(
     State(state): State<HttpServerState>,
     user: AuthUser,
     Json(req): Json<SearchRequest>,

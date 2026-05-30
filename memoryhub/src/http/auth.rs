@@ -6,14 +6,14 @@
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
-use base64::Engine;
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::Utc;
 use rand::RngExt;
 use rusqlite::{Connection, ErrorCode, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use thiserror::Error;
+
+use super::error::AuthError;
 
 /// Prefix on every token secret; aids leak scanning.
 const TOKEN_PREFIX: &str = "mh_";
@@ -47,7 +47,7 @@ impl Default for AuthConfig {
 }
 
 impl AuthConfig {
-    /// Resolves `db_path` against the base directory (mirrors `MemoryConfig::resolve_paths`).
+    /// Resolves `db_path` against the base directory.
     pub fn resolve_paths(&mut self, base: &Path) {
         if self.db_path != ":memory:" && !Path::new(&self.db_path).is_absolute() {
             self.db_path = base.join(&self.db_path).to_string_lossy().to_string();
@@ -56,10 +56,10 @@ impl AuthConfig {
 
     /// Applies the `MEMORYHUB_ADMIN_TOKEN` env override (preferred over the config value).
     pub fn apply_env(&mut self) {
-        if let Some(tok) = std::env::var_os("MEMORYHUB_ADMIN_TOKEN")
-            && !tok.is_empty()
+        if let Some(token) = std::env::var_os("MEMORYHUB_ADMIN_TOKEN")
+            && !token.is_empty()
         {
-            self.admin_token = Some(tok.to_string_lossy().to_string());
+            self.admin_token = Some(token.to_string_lossy().to_string());
         }
     }
 }
@@ -88,27 +88,8 @@ pub struct NewToken {
     pub secret: String,
 }
 
-/// Errors from `AuthStore`.
-#[derive(Debug, Error)]
-pub enum AuthError {
-    #[error("user already exists")]
-    UserExists,
-
-    #[error("user not found")]
-    UserNotFound,
-
-    #[error("token not found")]
-    TokenNotFound,
-
-    #[error("auth db error: {0}")]
-    Db(#[from] rusqlite::Error),
-
-    #[error("auth task join error: {0}")]
-    Join(#[from] tokio::task::JoinError),
-}
-
 /// SHA-256 hex digest of a secret. Used both to persist token hashes and to compare the root
-/// token as fixed-length digests (avoids leaking secret length / early-exit on raw bytes).
+/// token as fixed-length digests.
 fn sha256_hex(secret: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(secret.as_bytes());
@@ -125,7 +106,7 @@ fn generate_secret() -> String {
     format!("{}{}", TOKEN_PREFIX, URL_SAFE_NO_PAD.encode(bytes))
 }
 
-/// User + token storage over its own `auth.db`. Not an actor; SQLite locking serializes access.
+/// User + token storage over its own `auth.db`.
 #[derive(Clone)]
 pub struct AuthStore {
     conn: Arc<Mutex<Connection>>,
@@ -141,7 +122,7 @@ impl AuthStore {
         Self::from_connection(conn, admin_token)
     }
 
-    /// Opens an in-memory `auth.db` (tests).
+    /// Opens an in-memory `auth.db`.
     pub fn open_in_memory(admin_token: Option<String>) -> Result<Self, AuthError> {
         let conn = Connection::open_in_memory()?;
         Self::from_connection(conn, admin_token)
@@ -154,6 +135,7 @@ impl AuthStore {
             root_token_hash: admin_token.as_deref().map(sha256_hex),
         };
         store.init_schema()?;
+
         Ok(store)
     }
 
@@ -175,6 +157,7 @@ impl AuthStore {
                 expires_at INTEGER
             );",
         )?;
+
         Ok(())
     }
 

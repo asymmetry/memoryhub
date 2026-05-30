@@ -104,13 +104,13 @@ pub async fn create_token(
     Path(username): Path<String>,
     Json(req): Json<CreateTokenRequest>,
 ) -> Result<Json<NewTokenResponse>, HttpError> {
-    let minted = state
+    let new = state
         .auth
         .create_token(&username, req.name.as_deref(), req.expires_at)
         .await?;
     Ok(Json(NewTokenResponse {
-        id: minted.id,
-        token: minted.secret,
+        id: new.id,
+        token: new.secret,
     }))
 }
 

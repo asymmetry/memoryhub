@@ -499,9 +499,10 @@ mod tests {
 
     #[test]
     fn auth_config_resolves_relative_db_path() {
+        let base = Path::new("/data/mh");
         let mut cfg = AuthConfig::default();
-        cfg.resolve_paths(Path::new("/data/mh"));
-        assert_eq!(cfg.db_path, "/data/mh/auth.db");
+        cfg.resolve_paths(base);
+        assert_eq!(cfg.db_path, base.join("auth.db").to_string_lossy());
     }
 
     #[test]

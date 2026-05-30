@@ -11,6 +11,7 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use chrono::Utc;
 use rand::RngExt;
 use rusqlite::{Connection, ErrorCode, OptionalExtension, params};
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
@@ -24,6 +25,43 @@ pub enum Principal {
     Root,
     /// A real user resolved from a token in `auth.db`.
     User { username: String, role: String },
+}
+
+/// The `[auth]` configuration section.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AuthConfig {
+    /// Path to the auth SQLite database (resolved against `base_dir` like other data paths).
+    pub db_path: String,
+    /// Optional root admin token; overridden by `MEMORYHUB_ADMIN_TOKEN`.
+    #[serde(default)]
+    pub admin_token: Option<String>,
+}
+
+impl Default for AuthConfig {
+    fn default() -> Self {
+        Self {
+            db_path: "auth.db".to_string(),
+            admin_token: None,
+        }
+    }
+}
+
+impl AuthConfig {
+    /// Resolves `db_path` against the base directory (mirrors `MemoryConfig::resolve_paths`).
+    pub fn resolve_paths(&mut self, base: &Path) {
+        if self.db_path != ":memory:" && !Path::new(&self.db_path).is_absolute() {
+            self.db_path = base.join(&self.db_path).to_string_lossy().to_string();
+        }
+    }
+
+    /// Applies the `MEMORYHUB_ADMIN_TOKEN` env override (preferred over the config value).
+    pub fn apply_env(&mut self) {
+        if let Some(tok) = std::env::var_os("MEMORYHUB_ADMIN_TOKEN")
+            && !tok.is_empty()
+        {
+            self.admin_token = Some(tok.to_string_lossy().to_string());
+        }
+    }
 }
 
 /// A user row.
@@ -474,5 +512,22 @@ mod tests {
 
         let no_root = store();
         assert!(!no_root.verify_root("mh_anything"));
+    }
+
+    #[test]
+    fn auth_config_resolves_relative_db_path() {
+        let mut cfg = AuthConfig::default();
+        cfg.resolve_paths(Path::new("/data/mh"));
+        assert_eq!(cfg.db_path, "/data/mh/auth.db");
+    }
+
+    #[test]
+    fn auth_config_leaves_in_memory_unchanged() {
+        let mut cfg = AuthConfig {
+            db_path: ":memory:".into(),
+            admin_token: None,
+        };
+        cfg.resolve_paths(Path::new("/data/mh"));
+        assert_eq!(cfg.db_path, ":memory:");
     }
 }

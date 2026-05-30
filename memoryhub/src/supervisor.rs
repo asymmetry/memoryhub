@@ -48,7 +48,7 @@ impl Actor for MemoryHub {
             server,
             memory,
             llm,
-            ..
+            auth,
         } = self.config.clone();
 
         let (llm_addr, llm_handle) = LlmService::create("llm-service", |child_ctx| {
@@ -63,7 +63,7 @@ impl Actor for MemoryHub {
 
         let (http_addr, http_handle) = HttpServer::create("http-server", |child_ctx| {
             child_ctx.set_supervisor(Some(ctx.address().into()));
-            Ok(HttpServer::new(server, memory_addr.clone()))
+            Ok(HttpServer::new(server, auth.clone(), memory_addr.clone()))
         })?;
 
         self.llm = Some(llm_addr);

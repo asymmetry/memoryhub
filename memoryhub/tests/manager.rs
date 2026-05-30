@@ -3,7 +3,7 @@ use std::time::Duration;
 use acktor::{Actor, Signal};
 use memoryhub::{
     MemoryHub,
-    config::{Config, LlmConfig, MemoryConfig, ServerConfig},
+    config::{AuthConfig, Config, LlmConfig, MemoryConfig, ServerConfig},
 };
 
 /// A config that builds the mock LLM provider (via the `_test` feature, which
@@ -24,6 +24,10 @@ fn test_config(dir: &std::path::Path) -> Config {
             embedding_provider: "mock".to_string(),
             prompts_dir: dir.join("prompts"),
             ..LlmConfig::default()
+        },
+        auth: AuthConfig {
+            db_path: ":memory:".to_string(),
+            admin_token: Some("mh_root".to_string()),
         },
     }
 }

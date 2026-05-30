@@ -6,7 +6,7 @@ use std::sync::Arc;
 use acktor::{Actor, Address, Context, ErrorReport, JoinHandle};
 use serde::{Deserialize, Serialize};
 use tokio::net::TcpListener;
-use tracing::{Instrument, error, info};
+use tracing::{Instrument, error, info, warn};
 
 use crate::memory::MemoryManager;
 
@@ -17,7 +17,7 @@ pub mod error;
 pub use error::HttpServerError;
 
 pub mod auth;
-pub use auth::{AuthError, AuthStore, NewToken, Principal, TokenInfo, UserInfo};
+pub use auth::{AuthConfig, AuthError, AuthStore, NewToken, Principal, TokenInfo, UserInfo};
 
 pub mod middleware;
 pub use middleware::{AdminPrincipal, AuthUser, auth_middleware};
@@ -64,15 +64,21 @@ impl HttpServerState {
 /// Actor that owns the Axum HTTP server.
 pub struct HttpServer {
     config: ServerConfig,
+    auth_config: AuthConfig,
     memory_manager: Address<MemoryManager>,
     serve_handle: Option<JoinHandle<()>>,
 }
 
 impl HttpServer {
     /// Constructs a new `HttpServer`.
-    pub fn new(config: ServerConfig, memory_manager: Address<MemoryManager>) -> Self {
+    pub fn new(
+        config: ServerConfig,
+        auth_config: AuthConfig,
+        memory_manager: Address<MemoryManager>,
+    ) -> Self {
         Self {
             config,
+            auth_config,
             memory_manager,
             serve_handle: None,
         }
@@ -97,11 +103,25 @@ impl Actor for HttpServer {
                 addr: addr_str.clone(),
                 source,
             })?;
-        // Placeholder in-memory auth store; replaced with the config-driven store in the
-        // HttpServer/config wiring task.
-        let auth_store = Arc::new(
-            AuthStore::open_in_memory(None).map_err(|source| HttpServerError::Auth { source })?,
-        );
+        let auth_store = if self.auth_config.db_path == ":memory:" {
+            AuthStore::open_in_memory(self.auth_config.admin_token.clone())
+        } else {
+            AuthStore::open(
+                std::path::Path::new(&self.auth_config.db_path),
+                self.auth_config.admin_token.clone(),
+            )
+        }
+        .map_err(|source| HttpServerError::Auth { source })?;
+
+        if self.auth_config.admin_token.is_none() && !auth_store.has_admin().await.unwrap_or(false)
+        {
+            warn!(
+                "No root admin token configured and no admin user exists — \
+                 user/token management is unreachable until one is provisioned"
+            );
+        }
+
+        let auth_store = Arc::new(auth_store);
         let app = build_router(HttpServerState::new(
             self.memory_manager.clone(),
             auth_store,

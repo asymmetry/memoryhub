@@ -26,6 +26,9 @@ pub enum HttpServerError {
         addr: String,
         source: std::net::AddrParseError,
     },
+
+    #[error("auth store error: {source}")]
+    Auth { source: AuthError },
 }
 
 /// Error type returned by HTTP handlers.

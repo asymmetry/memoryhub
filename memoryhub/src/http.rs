@@ -1,6 +1,7 @@
 //! HTTP service: Axum-based JSON API over the Memory Manager actor.
 
 use std::net::SocketAddr;
+use std::sync::Arc;
 
 use acktor::{Actor, Address, Context, ErrorReport, JoinHandle};
 use serde::{Deserialize, Serialize};
@@ -17,6 +18,9 @@ pub use error::HttpServerError;
 
 pub mod auth;
 pub use auth::{AuthError, AuthStore, NewToken, Principal, TokenInfo, UserInfo};
+
+pub mod middleware;
+pub use middleware::{AdminPrincipal, AuthUser, auth_middleware};
 
 /// HTTP server bind settings.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -41,12 +45,17 @@ impl Default for ServerConfig {
 pub struct HttpServerState {
     /// Address of the Memory Manager actor that handlers dispatch requests to.
     pub memory_manager: Address<MemoryManager>,
+    /// User + token storage backing authentication.
+    pub auth: Arc<AuthStore>,
 }
 
 impl HttpServerState {
     /// Constructs the shared state of the `HttpServer`.
-    pub fn new(memory_manager: Address<MemoryManager>) -> Self {
-        Self { memory_manager }
+    pub fn new(memory_manager: Address<MemoryManager>, auth: Arc<AuthStore>) -> Self {
+        Self {
+            memory_manager,
+            auth,
+        }
     }
 }
 
@@ -86,7 +95,15 @@ impl Actor for HttpServer {
                 addr: addr_str.clone(),
                 source,
             })?;
-        let app = build_router(HttpServerState::new(self.memory_manager.clone()));
+        // Placeholder in-memory auth store; replaced with the config-driven store in the
+        // HttpServer/config wiring task.
+        let auth_store = Arc::new(
+            AuthStore::open_in_memory(None).map_err(|source| HttpServerError::Auth { source })?,
+        );
+        let app = build_router(HttpServerState::new(
+            self.memory_manager.clone(),
+            auth_store,
+        ));
 
         let handle = tokio::spawn(
             async move {

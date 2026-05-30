@@ -16,7 +16,7 @@ pub mod error;
 pub use error::HttpServerError;
 
 pub mod auth;
-pub use auth::{AuthError, NewToken, Principal, TokenInfo, UserInfo};
+pub use auth::{AuthError, AuthStore, NewToken, Principal, TokenInfo, UserInfo};
 
 /// HTTP server bind settings.
 #[derive(Debug, Clone, Serialize, Deserialize)]

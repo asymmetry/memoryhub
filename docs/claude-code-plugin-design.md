@@ -5,7 +5,7 @@ Keeps Claude Code memories in sync with MemoryHub. Memory files are pushed autom
 ## Layout
 
 ```
-agents/claude-code/
+plugins/claude-code/
   plugin.json
   memoryhub.py
   skills/

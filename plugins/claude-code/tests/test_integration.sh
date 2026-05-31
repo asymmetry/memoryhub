@@ -2,7 +2,7 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
-PLUGIN_DIR="$REPO_ROOT/agents/claude-code"
+PLUGIN_DIR="$REPO_ROOT/plugins/claude-code"
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"; kill "$SERVER_PID" 2>/dev/null || true' EXIT
 

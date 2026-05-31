@@ -1,5 +1,6 @@
 //! MemoryHub MCP server: a stdio MCP server exposing MemoryHub memories as tools.
 
+mod client;
 mod config;
 mod identity;
 

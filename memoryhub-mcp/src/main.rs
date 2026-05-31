@@ -1,5 +1,7 @@
 //! MemoryHub MCP server: a stdio MCP server exposing MemoryHub memories as tools.
 
+mod config;
+
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::{ServerHandler, ServiceExt, model::*, tool_handler, tool_router, transport::stdio};
 

@@ -3,6 +3,7 @@
 mod client;
 mod config;
 mod identity;
+mod server;
 
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::{ServerHandler, ServiceExt, model::*, tool_handler, tool_router, transport::stdio};

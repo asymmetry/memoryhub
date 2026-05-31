@@ -1,0 +1,25 @@
+[package]
+name = "memoryhub-mcp"
+description = "MCP stdio server exposing MemoryHub memories to coding agents"
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+categories.workspace = true
+keywords.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+reqwest = { workspace = true, features = ["json", "rustls"], default-features = false }
+rmcp.workspace = true
+schemars.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "io-std"] }
+uuid = { workspace = true, features = ["v4", "serde"] }
+
+[dev-dependencies]
+tempfile.workspace = true
+wiremock.workspace = true

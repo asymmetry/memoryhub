@@ -1,5 +1,6 @@
 //! Thin HTTP client over the MemoryHub `/v1` API.
 
+use reqwest::Response;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -43,7 +44,7 @@ struct SearchRequest<'a> {
     query: &'a str,
 }
 
-/// One search hit (mirrors the server's `SearchResult`).
+/// One search hit (mirrors `SearchResult` in `memoryhub`).
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct SearchResult {
     pub path: String,
@@ -60,13 +61,13 @@ struct SearchResponse {
 
 /// Client holding the base URL, bearer token, and a shared `reqwest::Client`.
 #[derive(Clone)]
-pub struct MemoryClient {
+pub struct MemoryHubClient {
     http: reqwest::Client,
     base_url: String,
     token: String,
 }
 
-impl MemoryClient {
+impl MemoryHubClient {
     pub fn new(base_url: String, token: String) -> Self {
         Self {
             http: reqwest::Client::new(),
@@ -75,11 +76,10 @@ impl MemoryClient {
         }
     }
 
-    async fn post<B: Serialize>(
-        &self,
-        path: &str,
-        body: &B,
-    ) -> Result<reqwest::Response, ClientError> {
+    async fn post<B>(&self, path: &str, body: &B) -> Result<Response, ClientError>
+    where
+        B: Serialize,
+    {
         let resp = self
             .http
             .post(format!("{}{}", self.base_url, path))
@@ -94,7 +94,7 @@ impl MemoryClient {
         Ok(resp)
     }
 
-    async fn ensure_ok(resp: reqwest::Response) -> Result<reqwest::Response, ClientError> {
+    async fn ensure_ok(resp: Response) -> Result<Response, ClientError> {
         if resp.status().is_success() {
             Ok(resp)
         } else {
@@ -104,6 +104,7 @@ impl MemoryClient {
         }
     }
 
+    /// Proxies a `search` to the MemoryHub API.
     pub async fn search(
         &self,
         agent_id: Uuid,
@@ -120,6 +121,7 @@ impl MemoryClient {
         Ok(parsed.results)
     }
 
+    /// Proxies a `write` to the MemoryHub API.
     pub async fn write(
         &self,
         agent_id: Uuid,
@@ -140,7 +142,7 @@ impl MemoryClient {
         Ok(())
     }
 
-    /// Returns `None` when the file does not exist (404).
+    /// Proxies a `read` to the MemoryHub API.
     pub async fn read(
         &self,
         agent_id: Uuid,
@@ -163,9 +165,12 @@ impl MemoryClient {
 
 #[cfg(test)]
 mod tests {
+    use wiremock::{
+        Mock, MockServer, ResponseTemplate,
+        matchers::{header, method, path},
+    };
+
     use super::*;
-    use wiremock::matchers::{header, method, path};
-    use wiremock::{Mock, MockServer, ResponseTemplate};
 
     fn agent() -> Uuid {
         Uuid::new_v4()
@@ -186,7 +191,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let client = MemoryClient::new(server.uri(), "mh_tok".into());
+        let client = MemoryHubClient::new(server.uri(), "mh_tok".into());
         let results = client.search(agent(), "hello").await.unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].path, "alice/abc/notes.md");
@@ -200,7 +205,7 @@ mod tests {
             .respond_with(ResponseTemplate::new(200).set_body_string("{}"))
             .mount(&server)
             .await;
-        let client = MemoryClient::new(server.uri(), "mh_tok".into());
+        let client = MemoryHubClient::new(server.uri(), "mh_tok".into());
         client.write(agent(), "notes.md", "hi").await.unwrap();
     }
 
@@ -214,7 +219,7 @@ mod tests {
             )
             .mount(&server)
             .await;
-        let client = MemoryClient::new(server.uri(), "mh_tok".into());
+        let client = MemoryHubClient::new(server.uri(), "mh_tok".into());
         assert_eq!(
             client.read(agent(), "x.md").await.unwrap(),
             Some("body".to_string())
@@ -226,7 +231,7 @@ mod tests {
             .respond_with(ResponseTemplate::new(404).set_body_string(r#"{"error":"not_found"}"#))
             .mount(&server404)
             .await;
-        let client404 = MemoryClient::new(server404.uri(), "mh_tok".into());
+        let client404 = MemoryHubClient::new(server404.uri(), "mh_tok".into());
         assert_eq!(client404.read(agent(), "missing.md").await.unwrap(), None);
     }
 
@@ -238,7 +243,7 @@ mod tests {
             .respond_with(ResponseTemplate::new(401).set_body_string(r#"{"error":"unauthorized"}"#))
             .mount(&server)
             .await;
-        let client = MemoryClient::new(server.uri(), "bad".into());
+        let client = MemoryHubClient::new(server.uri(), "bad".into());
         let err = client.search(agent(), "q").await.unwrap_err();
         assert!(matches!(err, ClientError::Unauthorized));
     }
@@ -246,7 +251,7 @@ mod tests {
     #[tokio::test]
     async fn unreachable_maps_to_error() {
         // Nothing listening on this port.
-        let client = MemoryClient::new("http://127.0.0.1:1".into(), "t".into());
+        let client = MemoryHubClient::new("http://127.0.0.1:1".into(), "t".into());
         let err = client.search(agent(), "q").await.unwrap_err();
         assert!(matches!(err, ClientError::Unreachable(_)));
     }

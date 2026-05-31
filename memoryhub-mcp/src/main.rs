@@ -1,4 +1,4 @@
-//! MemoryHub MCP server: a stdio MCP server exposing MemoryHub memories as tools.
+//! MemoryHub MCP server: a stdio MCP server exposing MemoryHub API as tools.
 
 mod client;
 mod config;
@@ -7,9 +7,9 @@ mod server;
 
 use rmcp::{ServiceExt, transport::stdio};
 
-use crate::client::MemoryClient;
+use crate::client::MemoryHubClient;
 use crate::config::Config;
-use crate::server::MemoryServer;
+use crate::server::McpServer;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -21,24 +21,14 @@ async fn main() -> anyhow::Result<()> {
         }
     };
 
-    let config_dir = config_dir();
-    let client = MemoryClient::new(config.url.clone(), config.token.clone());
-    let server = MemoryServer::new(client, config, config_dir);
+    let config_dir = dirs::config_dir()
+        .map(|d| d.join("memoryhub"))
+        .unwrap_or_else(|| std::path::PathBuf::from(".memoryhub"));
+    let client = MemoryHubClient::new(config.url.clone(), config.token.clone());
+    let server = McpServer::new(client, config, config_dir);
 
     let service = server.serve(stdio()).await?;
     service.waiting().await?;
-    Ok(())
-}
 
-/// `$XDG_CONFIG_HOME/memoryhub` or `~/.config/memoryhub`, falling back to the current directory.
-fn config_dir() -> std::path::PathBuf {
-    if let Some(xdg) = std::env::var_os("XDG_CONFIG_HOME").filter(|s| !s.is_empty()) {
-        return std::path::PathBuf::from(xdg).join("memoryhub");
-    }
-    if let Some(home) = std::env::var_os("HOME").filter(|s| !s.is_empty()) {
-        return std::path::PathBuf::from(home)
-            .join(".config")
-            .join("memoryhub");
-    }
-    std::path::PathBuf::from(".memoryhub")
+    Ok(())
 }

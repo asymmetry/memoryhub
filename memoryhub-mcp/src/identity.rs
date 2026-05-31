@@ -1,8 +1,8 @@
-//! Resolution of the per-agent `agent_id`.
+//! Utilities for resolving the agent id.
 //!
-//! Order: explicit override → a UUID persisted under the MCP client's name → a `default` UUID.
-//! Keying the persisted file on the client name puts each agent in its own server-side folder
-//! while staying stable across restarts.
+//! Each connecting client agent is identified by a UUID. Usually this is provided by the
+//! `MEMORYHUB_AGENT_ID` environment variable. If the env variable is not set, a UUID is generated
+//! and persisted on disk (identifyed by the client name) for future reuse.
 
 use std::fs;
 use std::io;
@@ -10,8 +10,10 @@ use std::path::Path;
 
 use uuid::Uuid;
 
-/// Reduces an MCP client name to a safe filename slug: lowercase, `[a-z0-9-_]` kept, every other
-/// run collapsed to a single `-`. Empty input (or all-invalid) yields `"default"`.
+/// Reduces an MCP client name to a safe filename slug.
+///
+/// Only `[a-z0-9-_]` are kept, every other run collapsed to a single `-`. Empty input (or
+/// all-invalid) yields `"default"`.
 pub fn slug(name: Option<&str>) -> String {
     let raw = name.unwrap_or("").trim().to_lowercase();
     let mut out = String::new();
@@ -33,16 +35,19 @@ pub fn slug(name: Option<&str>) -> String {
     }
 }
 
-/// Resolves the `agent_id`. With `override_id`, returns it. Otherwise reads-or-creates a UUID at
+/// Resolves the `agent_id`.
+///
+/// If `agent_id` is provided, returns it. Otherwise reads-or-creates a UUID at
 /// `base_dir/agents/<slug(client_name)>`, persisting a freshly generated one on first use.
 pub fn resolve_agent_id(
-    override_id: Option<Uuid>,
+    agent_id: Option<Uuid>,
     client_name: Option<&str>,
     base_dir: &Path,
 ) -> io::Result<Uuid> {
-    if let Some(id) = override_id {
+    if let Some(id) = agent_id {
         return Ok(id);
     }
+
     let dir = base_dir.join("agents");
     let path = dir.join(slug(client_name));
 
@@ -51,9 +56,11 @@ pub fn resolve_agent_id(
     {
         return Ok(id);
     }
+
     let id = Uuid::new_v4();
     fs::create_dir_all(&dir)?;
     fs::write(&path, id.to_string())?;
+
     Ok(id)
 }
 

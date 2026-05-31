@@ -1,21 +1,24 @@
 //! The MCP server: three tools forwarding to MemoryHub, plus agent identity wiring.
 
-use std::path::PathBuf;
+use std::fs;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use rmcp::handler::server::router::tool::ToolRouter;
-use rmcp::handler::server::wrapper::Parameters;
-use rmcp::service::RequestContext;
 use rmcp::{
-    ErrorData as McpError, RoleServer, ServerHandler, model::*, schemars, tool, tool_handler,
-    tool_router,
+    ErrorData as McpError, RoleServer, ServerHandler,
+    handler::server::{router::tool::ToolRouter, wrapper::Parameters},
+    model::*,
+    schemars,
+    service::RequestContext,
+    tool, tool_handler, tool_router,
 };
 use serde::Deserialize;
 use tokio::sync::OnceCell;
 use uuid::Uuid;
 
-use crate::client::{ClientError, MemoryClient, SearchResult};
+use crate::client::{ClientError, MemoryHubClient, SearchResult};
 use crate::config::Config;
+use crate::identity;
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct SearchArgs {
@@ -61,10 +64,8 @@ pub enum SaveError {
     Client(#[from] ClientError),
 }
 
-// --- Tool cores (network + formatting; unit-tested directly) ---
-
 pub async fn do_search(
-    client: &MemoryClient,
+    client: &MemoryHubClient,
     agent_id: Uuid,
     query: &str,
 ) -> Result<String, ClientError> {
@@ -72,21 +73,22 @@ pub async fn do_search(
 }
 
 pub async fn do_save(
-    client: &MemoryClient,
+    client: &MemoryHubClient,
     agent_id: Uuid,
     path: &str,
 ) -> Result<String, SaveError> {
-    if !std::path::Path::new(path).is_absolute() {
+    if !Path::new(path).is_absolute() {
         return Err(SaveError::NotAbsolute);
     }
     let content =
-        std::fs::read_to_string(path).map_err(|e| SaveError::Io(format!("{}: {}", path, e)))?;
+        fs::read_to_string(path).map_err(|e| SaveError::Io(format!("{}: {}", path, e)))?;
     client.write(agent_id, path, &content).await?;
+
     Ok(format!("Saved memory '{}'.", path))
 }
 
 pub async fn do_read(
-    client: &MemoryClient,
+    client: &MemoryHubClient,
     agent_id: Uuid,
     filename: &str,
 ) -> Result<String, ClientError> {
@@ -96,22 +98,19 @@ pub async fn do_read(
     }
 }
 
-// --- rmcp server ---
-
 #[derive(Clone)]
-pub struct MemoryServer {
-    client: MemoryClient,
+pub struct McpServer {
+    client: MemoryHubClient,
     config: Config,
     config_dir: PathBuf,
     agent_id: Arc<OnceCell<Uuid>>,
-    // Read by the `#[tool_handler]`-generated dispatch, which rustc's dead-code analysis can't see.
     #[allow(dead_code)]
-    tool_router: ToolRouter<MemoryServer>,
+    tool_router: ToolRouter<McpServer>,
 }
 
 #[tool_router]
-impl MemoryServer {
-    pub fn new(client: MemoryClient, config: Config, config_dir: PathBuf) -> Self {
+impl McpServer {
+    pub fn new(client: MemoryHubClient, config: Config, config_dir: PathBuf) -> Self {
         Self {
             client,
             config,
@@ -130,8 +129,8 @@ impl MemoryServer {
                     .peer
                     .peer_info()
                     .map(|info| info.client_info.name.clone());
-                crate::identity::resolve_agent_id(
-                    self.config.agent_id_override,
+                identity::resolve_agent_id(
+                    self.config.agent_id,
                     client_name.as_deref(),
                     &self.config_dir,
                 )
@@ -191,7 +190,7 @@ impl MemoryServer {
 }
 
 #[tool_handler]
-impl ServerHandler for MemoryServer {
+impl ServerHandler for McpServer {
     fn get_info(&self) -> ServerInfo {
         let mut info = ServerInfo::default();
         info.instructions = Some(
@@ -207,9 +206,12 @@ impl ServerHandler for MemoryServer {
 
 #[cfg(test)]
 mod tests {
+    use wiremock::{
+        Mock, MockServer, ResponseTemplate,
+        matchers::{method, path},
+    };
+
     use super::*;
-    use wiremock::matchers::{method, path};
-    use wiremock::{Mock, MockServer, ResponseTemplate};
 
     #[test]
     fn format_search_empty_and_nonempty() {
@@ -240,14 +242,14 @@ mod tests {
         std::fs::write(&file, "remember this").unwrap();
         let abs = file.to_str().unwrap();
 
-        let client = MemoryClient::new(server.uri(), "mh_tok".into());
+        let client = MemoryHubClient::new(server.uri(), "mh_tok".into());
         let msg = do_save(&client, Uuid::new_v4(), abs).await.unwrap();
         assert_eq!(msg, format!("Saved memory '{}'.", abs));
     }
 
     #[tokio::test]
     async fn do_save_rejects_relative_path() {
-        let client = MemoryClient::new("http://127.0.0.1:1".into(), "t".into());
+        let client = MemoryHubClient::new("http://127.0.0.1:1".into(), "t".into());
         let err = do_save(&client, Uuid::new_v4(), "relative/x.md")
             .await
             .unwrap_err();
@@ -262,7 +264,7 @@ mod tests {
             .respond_with(ResponseTemplate::new(404).set_body_string(r#"{"error":"not_found"}"#))
             .mount(&server)
             .await;
-        let client = MemoryClient::new(server.uri(), "mh_tok".into());
+        let client = MemoryHubClient::new(server.uri(), "mh_tok".into());
         let msg = do_read(&client, Uuid::new_v4(), "missing.md")
             .await
             .unwrap();

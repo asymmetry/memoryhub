@@ -7,7 +7,7 @@ use uuid::Uuid;
 pub struct Config {
     pub url: String,
     pub token: String,
-    pub agent_id_override: Option<Uuid>,
+    pub agent_id: Option<Uuid>,
 }
 
 /// Configuration errors surfaced at startup.
@@ -24,8 +24,7 @@ pub enum ConfigError {
 }
 
 impl Config {
-    /// Builds a `Config` from already-read values (pure; testable without touching the
-    /// process environment). Empty strings are treated as absent.
+    /// Builds a `Config` from already-read values. Empty strings are treated as absent.
     pub fn load(
         url: Option<String>,
         token: Option<String>,
@@ -37,14 +36,15 @@ impl Config {
         let token = token
             .filter(|s| !s.is_empty())
             .ok_or(ConfigError::MissingToken)?;
-        let agent_id_override = match agent_id.filter(|s| !s.is_empty()) {
+        let agent_id = match agent_id.filter(|s| !s.is_empty()) {
             Some(s) => Some(s.parse::<Uuid>().map_err(|_| ConfigError::BadAgentId(s))?),
             None => None,
         };
+
         Ok(Config {
             url: url.trim_end_matches('/').to_string(),
             token,
-            agent_id_override,
+            agent_id,
         })
     }
 
@@ -85,7 +85,7 @@ mod tests {
         .unwrap();
         assert_eq!(cfg.url, "http://x:8000");
         assert_eq!(cfg.token, "mh_tok");
-        assert_eq!(cfg.agent_id_override.unwrap().to_string(), id);
+        assert_eq!(cfg.agent_id.unwrap().to_string(), id);
     }
 
     #[test]
@@ -102,6 +102,6 @@ mod tests {
     #[test]
     fn load_no_override_is_none() {
         let cfg = Config::load(Some("u".into()), Some("t".into()), None).unwrap();
-        assert!(cfg.agent_id_override.is_none());
+        assert!(cfg.agent_id.is_none());
     }
 }

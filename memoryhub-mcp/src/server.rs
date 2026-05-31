@@ -104,6 +104,8 @@ pub struct MemoryServer {
     config: Config,
     config_dir: PathBuf,
     agent_id: Arc<OnceCell<Uuid>>,
+    // Read by the `#[tool_handler]`-generated dispatch, which rustc's dead-code analysis can't see.
+    #[allow(dead_code)]
     tool_router: ToolRouter<MemoryServer>,
 }
 

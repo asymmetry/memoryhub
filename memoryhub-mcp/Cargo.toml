@@ -1,0 +1,30 @@
+[package]
+name = "memoryhub-mcp"
+version = "0.0.1"
+description = "MCP server for MemoryHub"
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+categories.workspace = true
+keywords.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+dirs.workspace = true
+reqwest = { workspace = true, features = [
+    "json",
+    "rustls",
+], default-features = false }
+rmcp = { workspace = true, features = ["transport-io"] }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "io-std"] }
+uuid = { workspace = true, features = ["v4", "serde"] }
+
+[dev-dependencies]
+rmcp = { workspace = true, features = ["client"] }
+tempfile.workspace = true
+wiremock.workspace = true

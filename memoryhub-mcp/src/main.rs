@@ -1,15 +1,8 @@
 //! MemoryHub MCP server: a stdio MCP server exposing MemoryHub API as tools.
 
-mod client;
-mod config;
-mod identity;
-mod server;
-
 use rmcp::{ServiceExt, transport::stdio};
 
-use crate::client::MemoryHubClient;
-use crate::config::Config;
-use crate::server::McpServer;
+use memoryhub_mcp::{client::MemoryHubClient, config::Config, server::McpServer};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {

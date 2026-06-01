@@ -25,5 +25,6 @@ tokio = { workspace = true, features = ["macros", "rt-multi-thread", "io-std"] }
 uuid = { workspace = true, features = ["v4", "serde"] }
 
 [dev-dependencies]
+rmcp = { workspace = true, features = ["client"] }
 tempfile.workspace = true
 wiremock.workspace = true

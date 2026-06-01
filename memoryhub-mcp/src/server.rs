@@ -230,6 +230,25 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn do_search_formats_hits() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/memories/search"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "results": [{
+                    "path": "alice/abc/notes.md",
+                    "start_line": 1, "end_line": 3, "score": 0.91, "snippet": "hello world"
+                }]
+            })))
+            .mount(&server)
+            .await;
+        let client = MemoryHubClient::new(server.uri(), "mh_tok".into());
+        let out = do_search(&client, Uuid::new_v4(), "hello").await.unwrap();
+        assert!(out.contains("alice/abc/notes.md"));
+        assert!(out.contains("hello world"));
+    }
+
+    #[tokio::test]
     async fn do_save_reads_file_and_uses_absolute_path_as_filename() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))

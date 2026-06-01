@@ -19,7 +19,7 @@ The three long-lived children are spawned on startup. Each incoming request spaw
 
 ## Messages
 
-**External** (from HTTP Server): `FileOpWrite`, `FileOpRead`, `FileOpDelete`, `Search`, all carrying `username` + `agent_id` (plus `filename`/`content`/`query`). `filename` is opaque — the agent embeds any sub-path in it, and the Memory Manager flattens `/` and `\` to `_` before touching disk or index.
+**External** (from HTTP Server): `FileOpWrite`, `FileOpRead`, `FileOpDelete`, `Search`, all carrying `username` + `agent_id`. Writes also carry `project` + `filename` + `content`; reads/deletes carry `filename`; search carries `query` plus a `scope` (`all`/`user`/`agent`, default `all`) and a `raw_only` flag (default `false`). `filename` is opaque — the agent embeds any sub-path in it, and the Memory Manager flattens `/` and `\` to `_` before touching disk or index. `project` is a single validated segment (see Storage & Filesystem Layout).
 
 **Internal**: Storage takes `StorageWrite`/`StorageRead`/`StorageDelete` keyed by `rel_path`. The Indexer takes `IndexInsert`/`IndexDelete` and `IndexSearch` (embeddings + identity scope). The Synthesizer takes `FileChanged(rel_path)`, fire-and-forget. Embedding and synthesis go to `LlmService` (`Embed`, `Synthesize`); `Synthesize` routes to a long-lived per-target task there that owns prompt engineering and context (see `llm-service-design.md`).
 
@@ -31,14 +31,15 @@ The three long-lived children are spawned on startup. Each incoming request spaw
 
 **Delete** — remove from the Indexer **first**, then from Storage. Index-first means a crash mid-delete leaves an orphaned file (harmless, re-indexable) rather than an index entry pointing at a missing file.
 
-**Search** — chunk the query; `Embed`; `IndexSearch` scoped to the caller's `(username, agent_id)`; reply with scored results.
+**Search** — chunk the query; `Embed`; `IndexSearch` with the request's `scope` (`all`/`user`/`agent`) and `raw_only` flag; reply with scored results.
 
-**Synthesizer** — `FileChanged` paths accumulate into a pending set, batched by a cool-down timer. On expiry it runs two passes, feeding only the files changed this cycle (the long-lived synthesis tasks preserve prior context, so raw memories are never re-sent in bulk):
+**Synthesizer** — `FileChanged` paths accumulate into a pending set, batched by a cool-down timer. The pending set holds only raw paths (the Synthesizer never notifies itself), so on expiry it runs a strict three-tier cascade — each tier consumes only the tier directly below it and feeds only what changed this cycle (the long-lived synthesis tasks preserve prior context, so sources are never re-sent in bulk):
 
-- _Per-user pass_ — group pending paths by user; for each, `Synthesize(User, prior_summary, sources)` from the user's changed files plus their current synthesized file, and write the result back. One user's failure is logged and skipped; the rest proceed.
-- _Global pass_ — runs only if at least one per-user summary was regenerated; its sources are those summaries, with the current global synthesized file as `prior_summary`.
+- _Per-agent pass_ — group pending paths by `(username, agent_id)`; for each, `Synthesize(Agent, prior_summary, sources)` from that agent's changed raw files (deleted files surfaced via a `_deleted_sources` marker) plus its current per-agent summary, and write the result back. Collect the agents that changed.
+- _Per-user pass_ — group the changed agents by user; for each, `Synthesize(User, prior_summary, sources)` whose sources are the latest per-agent summaries of that user's changed agents, with the user's current summary as `prior_summary`. Per-user no longer reads raw files directly. Collect the users that changed.
+- _Global pass_ — runs only if at least one per-user summary was regenerated; its sources are the latest summaries of the changed users, with the current global summary as `prior_summary`.
 
-`prior_summary` is the most recent on-disk synthesized file for the target, passed so a cold or just-reset task can reseed without losing state.
+One agent's or user's failure is logged and skipped; siblings proceed. `prior_summary` is the most recent on-disk synthesized file for the target, passed so a cold or just-reset task can reseed without losing state.
 
 ## Storage & Filesystem Layout
 
@@ -46,11 +47,12 @@ Storage is a dumb path-based wrapper — no knowledge of memory types, SQLite, o
 
 Under the configured `memory_dir`:
 
-- Raw memory: `{username}/{agent_id}/{flattened_filename}`
+- Raw memory: `{username}/{agent_id}/{project}/{flattened_filename}`
+- Per-agent synthesis: `{username}/{agent_id}/_synthesized/{date}-{NN}.md`
 - Per-user synthesis: `{username}/_synthesized/{date}-{NN}.md`
-- Cross-user synthesis: `_synthesized/{date}-{NN}.md`
+- Global synthesis: `_synthesized/{date}-{NN}.md`
 
-The `_synthesized` directory separates synthesized output from raw memories at both levels.
+The `_synthesized` directory separates synthesized output from raw memories at every level. `filename` is flattened (`/` and `\` → `_`) to a single leaf segment. `project` is a single caller-supplied segment: omitted or empty falls back to the reserved bucket `_default`; a value containing `/` or `\`, or equal to `_synthesized`/`_default`, is rejected (400) rather than sanitized. Reserved (leading-underscore) names keep raw projects from colliding with the synthesis folder or the default bucket.
 
 ### Synthesized output files
 
@@ -70,7 +72,7 @@ SQLite-based metadata, vector, and keyword index over four logical stores:
 - **chunks_fts** — FTS5 virtual table over chunk text (unicode61 tokenizer) for BM25 keyword search.
 - **chunks_vec** — sqlite-vec virtual table holding the embeddings; created lazily at the embedding dimension read from the first response. The dimension is persisted in a small key/value `meta` table so the vector table can be reconstructed on reopen; a mismatched dimension on insert is an error.
 
-Search is hybrid (sqlite-vec cosine + FTS5 BM25), scoped to `(username, agent_id)` by path-prefix match, returning `path`, `start_line`, `end_line`, `score`, `snippet`. Chunking is ~400 tokens with 80-token overlap.
+Search is hybrid (sqlite-vec cosine + FTS5 BM25), returning `path`, `start_line`, `end_line`, `score`, `snippet`. The request's `scope` selects a path-prefix filter — `all` (no prefix; the whole store), `user` (`{username}/%`), or `agent` (`{username}/{agent_id}/%`) — and `raw_only` adds `files.source = 'raw'` (the `files` table is joined in) to exclude the synthesized tiers. By default (`all`, `raw_only=false`) a search spans every user's raw memories and every summary tier, including the global summary. Chunking is ~400 tokens with 80-token overlap.
 
 ## Errors
 

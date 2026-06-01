@@ -29,7 +29,7 @@ Stored at `~/.claude/memoryhub.json`:
 }
 ```
 
-`agent_id` is generated once on first `/mh-config` run and never changes. MemoryHub namespaces files under `{username}/{agent_id}/`.
+`agent_id` is generated once on first `/mh-config` run and never changes. MemoryHub namespaces files under `{username}/{agent_id}/{project}/`; the plugin sends `project` (its per-project grouping; omitted → the `_default` bucket).
 
 ## Hook
 
@@ -45,9 +45,9 @@ Stored at `~/.claude/memoryhub.json`:
 
 All HTTP via stdlib `urllib`. Three subcommands:
 
-**`push`** — reads the `tool_calls` array from stdin JSON; selects `Write`/`Edit`/`MultiEdit` calls with a memory-dir `file_path`, dedups them; reads each file; POSTs to `/v1/memories/write` with `filename` set to the path relative to `~/.claude/projects` (`{project_hash}/memory/...`), so memory files from different projects stay distinct.
+**`push`** — reads the `tool_calls` array from stdin JSON; selects `Write`/`Edit`/`MultiEdit` calls with a memory-dir `file_path`, dedups them; reads each file; POSTs to `/v1/memories/write` with `project` set to the file's project grouping (its `{project_hash}` under `~/.claude/projects`) and `filename` set to the memory-relative leaf, so memory files from different projects land in distinct project folders server-side.
 
-**`push-all --project-dir <path>`** — walks the given project dir for memory files, pushes each with the same projects-relative `filename` as `push`, prints summary.
+**`push-all --project-dir <path>`** — walks the given project dir for memory files, pushes each with the same `project` + `filename` split as `push`, prints summary.
 
 **`config`** — interactive config editor; merges hook into `~/.claude/settings.json`.
 

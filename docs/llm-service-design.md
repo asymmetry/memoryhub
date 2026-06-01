@@ -25,7 +25,7 @@ LlmService (long-lived, child of MemoryHub) — single entry point
 | `Embed`      | `texts`                              | embeddings / `LlmError`       |
 | `Synthesize` | `target`, `prior_summary`, `sources` | synthesized text / `LlmError` |
 
-`target` is a `SynthesisTarget` — `User(username)` or `Global`. It selects **both** the long-lived task to route to and the prompt template kind (`User` → `per_user`, `Global` → `global`). `Embed` is forwarded to the `Embedder` from inside the returned future so the `LlmService` mailbox stays responsive; `Synthesize` gets-or-spawns the target's task, then forwards. When a task is spawned, `LlmService` watches its `JoinHandle` and removes the map entry on idle termination so the next call respawns cleanly.
+`target` is a `SynthesisTarget` — `Agent { username, agent_id }`, `User(username)`, or `Global`. It selects **both** the long-lived task to route to and the prompt template kind (`Agent` → `per_agent`, `User` → `per_user`, `Global` → `global`). `Embed` is forwarded to the `Embedder` from inside the returned future so the `LlmService` mailbox stays responsive; `Synthesize` gets-or-spawns the target's task, then forwards. When a task is spawned, `LlmService` watches its `JoinHandle` and removes the map entry on idle termination so the next call respawns cleanly.
 
 ## Provider Traits
 
@@ -41,7 +41,7 @@ A provider instance is built **per role**, and each role reads its own config:
 - **Embedding role** reads `embedding_api_key_env`, `embedding_base_url`, `embedding_model`.
 - A provider serving **both** roles is treated as a chat provider (reads the chat fields), with the one instance shared.
 
-This is what makes the default DeepSeek-chat + OpenAI-embeddings split work: each side reads its own URL and key. The two sets of fields exist precisely because the chat and embedding vendors differ in the default deployment.
+The two field sets exist precisely so the default DeepSeek-chat + OpenAI-embeddings split works: each side reads its own URL and key.
 
 ## SynthesisTask
 

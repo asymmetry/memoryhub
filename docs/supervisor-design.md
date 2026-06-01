@@ -12,9 +12,7 @@ Children are spawned in dependency order — `LlmService`, then `MemoryManager` 
 
 ## Supervision & Shutdown
 
-Child supervision events: a warning is logged and the child continues; a terminated/panicked event is logged and `MemoryHub` stops itself. Stopping converges with the operator path (ctrl-c, signalled from `main`) on the same teardown: children are terminated in reverse startup order (`HttpServer` → `MemoryManager` → `LlmService`), each awaited. A child that already died is handled harmlessly. `main` waits for `MemoryHub` to finish, bounded by a timeout so a stuck child cannot block process exit.
-
-Reverse-order teardown ensures the front door closes before its dependencies: `HttpServer` stops accepting requests before `MemoryManager` goes away, which stops before `LlmService`.
+Child supervision events: a warning is logged and the child continues; a terminated/panicked event is logged and `MemoryHub` stops itself. Stopping converges with the operator path (ctrl-c, signalled from `main`) on the same teardown: children are terminated in reverse startup order (`HttpServer` → `MemoryManager` → `LlmService`), each awaited, so the front door stops accepting requests before its dependencies go away. A child that already died is handled harmlessly. `main` waits for `MemoryHub` to finish, bounded by a timeout so a stuck child cannot block process exit.
 
 ## Errors
 

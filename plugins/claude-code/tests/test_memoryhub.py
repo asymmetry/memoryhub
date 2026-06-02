@@ -57,6 +57,15 @@ def test_get_filename_nested(tmp_path, monkeypatch):
     assert memoryhub.get_filename(f) == str(Path("proj-hash") / "memory" / "sub" / "deep.md")
 
 
+def test_split_project_filename(tmp_path, monkeypatch):
+    projects = tmp_path / "projects"
+    monkeypatch.setattr("memoryhub.PROJECTS_DIR", projects)
+    f = projects / "proj-hash" / "memory" / "sub" / "deep.md"
+    project, filename = memoryhub.split_project_filename(f)
+    assert project == "proj-hash"
+    assert filename == str(Path("memory") / "sub" / "deep.md")
+
+
 # --- load_config / save_config ---
 
 
@@ -139,7 +148,7 @@ def test_push_one_success(tmp_path):
         captured["payload"] = json.loads(req.data)
         return mock_resp
 
-    with patch("memoryhub.get_filename", return_value="test.md"), patch(
+    with patch("memoryhub.split_project_filename", return_value=("proj", "test.md")), patch(
         "urllib.request.urlopen", side_effect=capture
     ):
         ok, err = memoryhub.push_one(config, f)
@@ -149,13 +158,15 @@ def test_push_one_success(tmp_path):
     assert captured["headers"]["Authorization"] == "Bearer mh_tok"
     assert "username" not in captured["payload"]
     assert captured["payload"]["agent_id"] == "abc123"
+    assert captured["payload"]["project"] == "proj"
+    assert captured["payload"]["filename"] == "test.md"
 
 
 def test_push_one_http_error(tmp_path):
     f = tmp_path / "test.md"
     f.write_text("hello")
     config = {"url": "http://localhost:8000", "token": "mh_tok", "agent_id": "abc"}
-    with patch("memoryhub.get_filename", return_value="test.md"), patch(
+    with patch("memoryhub.split_project_filename", return_value=("proj", "test.md")), patch(
         "urllib.request.urlopen", side_effect=HTTPError(None, 500, "Server Error", {}, None)
     ):
         ok, err = memoryhub.push_one(config, f)
@@ -167,7 +178,7 @@ def test_push_one_network_error(tmp_path):
     f = tmp_path / "test.md"
     f.write_text("hello")
     config = {"url": "http://localhost:8000", "token": "mh_tok", "agent_id": "abc"}
-    with patch("memoryhub.get_filename", return_value="test.md"), patch(
+    with patch("memoryhub.split_project_filename", return_value=("proj", "test.md")), patch(
         "urllib.request.urlopen", side_effect=URLError("connection refused")
     ):
         ok, err = memoryhub.push_one(config, f)
@@ -255,27 +266,28 @@ def test_cmd_push_all_missing_project_exits(tmp_path):
     assert exc.value.code == 0
 
 
-def test_cmd_push_all_sends_projects_relative_filename(tmp_path, monkeypatch):
+def test_cmd_push_all_sends_project_and_filename(tmp_path, monkeypatch):
     projects = tmp_path / "projects"
     monkeypatch.setattr("memoryhub.PROJECTS_DIR", projects)
     project_dir = projects / "h"
     (project_dir / "memory").mkdir(parents=True)
     (project_dir / "memory" / "user_role.md").write_text("content")
     config = {"url": "http://localhost:8000", "token": "mh_tok", "agent_id": "abc"}
-    pushed_filenames = []
+    captured = []
     mock_resp = MagicMock()
     mock_resp.__enter__ = lambda s: s
     mock_resp.__exit__ = MagicMock(return_value=False)
 
     def capture(req, *a, **k):
-        pushed_filenames.append(json.loads(req.data)["filename"])
+        body = json.loads(req.data)
+        captured.append((body["project"], body["filename"]))
         return mock_resp
 
     with patch("memoryhub.load_config", return_value=config), patch(
         "urllib.request.urlopen", side_effect=capture
     ), patch("builtins.print"):
         memoryhub.cmd_push_all(project_dir)
-    assert pushed_filenames == [str(Path("h") / "memory" / "user_role.md")]
+    assert captured == [("h", str(Path("memory") / "user_role.md"))]
 
 
 # --- cmd_config ---

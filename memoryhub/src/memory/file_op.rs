@@ -1,7 +1,8 @@
-//! File operation actors.
+//! File operations.
 //!
-//! Spawned by the Memory Manager for each incoming FileOp message. Coordinates between Storage,
-//! Indexer, and the LLM Service, then terminates.
+//! Spawned by the [`MemoryManager`][super::MemoryManager] for each incoming `FileOp` message.
+//! Coordinates between Storage, the Indexer, and the Synthesizer to execute the requested
+//! operation, then terminates.
 
 use acktor::{Actor, Address, Context, ErrorReport, Handler, utils::debug_trace};
 use tracing::{error, warn};
@@ -64,7 +65,12 @@ impl Handler<FileOpWrite> for FileOp {
     ) -> Result<(), MemoryError> {
         debug_trace!("Handle command {:?}", msg);
 
-        let storage_path = get_raw_path(&msg.username, msg.agent_id, &msg.filename);
+        let storage_path = get_raw_path(
+            &msg.username,
+            msg.agent_id,
+            msg.project.as_deref(),
+            &msg.filename,
+        )?;
 
         // 1. Write to Storage.
         self.storage
@@ -144,7 +150,9 @@ impl Handler<FileOpWrite> for FileOp {
         if let Err(e) = self
             .synthesizer
             .do_send(FileChanged {
-                rel_path: storage_path.clone(),
+                username: msg.username.clone(),
+                agent_id: msg.agent_id,
+                path: storage_path.clone(),
             })
             .await
         {
@@ -169,7 +177,12 @@ impl Handler<FileOpRead> for FileOp {
     ) -> Result<Option<String>, MemoryError> {
         debug_trace!("Handle command {:?}", msg);
 
-        let storage_path = get_raw_path(&msg.username, msg.agent_id, &msg.filename);
+        let storage_path = get_raw_path(
+            &msg.username,
+            msg.agent_id,
+            msg.project.as_deref(),
+            &msg.filename,
+        )?;
 
         let content = self
             .storage
@@ -191,7 +204,12 @@ impl Handler<FileOpDelete> for FileOp {
     ) -> Result<(), MemoryError> {
         debug_trace!("Handle command {:?}", msg);
 
-        let storage_path = get_raw_path(&msg.username, msg.agent_id, &msg.filename);
+        let storage_path = get_raw_path(
+            &msg.username,
+            msg.agent_id,
+            msg.project.as_deref(),
+            &msg.filename,
+        )?;
 
         // Delete from Indexer first.
         self.index
@@ -214,7 +232,9 @@ impl Handler<FileOpDelete> for FileOp {
         if let Err(e) = self
             .synthesizer
             .do_send(FileChanged {
-                rel_path: storage_path.clone(),
+                username: msg.username.clone(),
+                agent_id: msg.agent_id,
+                path: storage_path.clone(),
             })
             .await
         {

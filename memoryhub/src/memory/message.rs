@@ -1,8 +1,4 @@
-//! Message types for the Memory Manager actor hierarchy.
-//!
-//! Defines all messages exchanged between actors in the Memory Manager
-//! sub-system. Each message uses `#[derive(Message)]` from acktor
-//! with `#[result_type(...)]` to specify the reply type.
+//! Message types for the [`MemoryManager`][super::MemoryManager] and its child actors.
 
 use acktor::Message;
 use serde::{Deserialize, Serialize};
@@ -14,6 +10,19 @@ use crate::memory::error::{IndexError, MemoryError, StorageError};
 // ---------------------------------------------------------------------------
 // Shared types
 // ---------------------------------------------------------------------------
+
+/// Identity scope for a search request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SearchScope {
+    /// Whole store, across every user (plus the global summary).
+    #[default]
+    All,
+    /// The caller's user: `{username}/%`.
+    User,
+    /// The caller's user+agent: `{username}/{agent_id}/%`.
+    Agent,
+}
 
 /// A chunk of text extracted from a memory file, with its embedding vector.
 #[derive(Debug)]
@@ -101,6 +110,8 @@ pub struct IndexSearch {
     pub embeddings: Vec<Embedding>,
     pub username: String,
     pub agent_id: Uuid,
+    pub scope: SearchScope,
+    pub raw_only: bool,
     pub limit: usize,
 }
 
@@ -114,6 +125,7 @@ pub struct IndexSearch {
 pub struct FileOpWrite {
     pub username: String,
     pub agent_id: Uuid,
+    pub project: Option<String>,
     pub filename: String,
     pub content: String,
 }
@@ -124,6 +136,7 @@ pub struct FileOpWrite {
 pub struct FileOpRead {
     pub username: String,
     pub agent_id: Uuid,
+    pub project: Option<String>,
     pub filename: String,
 }
 
@@ -133,6 +146,7 @@ pub struct FileOpRead {
 pub struct FileOpDelete {
     pub username: String,
     pub agent_id: Uuid,
+    pub project: Option<String>,
     pub filename: String,
 }
 
@@ -142,6 +156,8 @@ pub struct FileOpDelete {
 pub struct Search {
     pub username: String,
     pub agent_id: Uuid,
+    pub scope: SearchScope,
+    pub raw_only: bool,
     pub query: String,
 }
 
@@ -150,12 +166,12 @@ pub struct Search {
 // ---------------------------------------------------------------------------
 
 /// Fire-and-forget notification that a memory file was written or deleted.
-///
-/// Sent from `FileOp` to the `Synthesizer` after a successful index update.
-#[derive(Debug, Clone, Message)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Message)]
 #[result_type(())]
 pub struct FileChanged {
-    pub rel_path: String,
+    pub username: String,
+    pub agent_id: Uuid,
+    pub path: String,
 }
 
 #[cfg(test)]
@@ -178,6 +194,7 @@ mod tests {
         let msg = FileOpWrite {
             username: "alice".to_string(),
             agent_id: Uuid::new_v4(),
+            project: Some("proj".to_string()),
             filename: "2026-03-31.md".to_string(),
             content: "hello".to_string(),
         };
@@ -198,10 +215,14 @@ mod tests {
 
     #[test]
     fn file_changed_msg_fields() {
+        let agent_id = Uuid::new_v4();
         let msg = FileChanged {
-            rel_path: "alice/agent1/x.md".to_string(),
+            username: "alice".to_string(),
+            agent_id,
+            path: format!("alice/{}/x.md", agent_id),
         };
-        assert_eq!(msg.rel_path, "alice/agent1/x.md");
+        assert_eq!(msg.username, "alice");
+        assert_eq!(msg.agent_id, agent_id);
     }
 
     #[test]

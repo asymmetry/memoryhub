@@ -106,6 +106,9 @@ impl IntoResponse for HttpError {
                 "internal",
                 Some(msg.clone()),
             ),
+            HttpError::Memory(MemoryError::InvalidProject(msg)) => {
+                (StatusCode::BAD_REQUEST, "bad_request", Some(msg.clone()))
+            }
             HttpError::Memory(e) => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "internal",
@@ -196,5 +199,14 @@ mod tests {
         let (status, body) = body_string(err.into_response()).await;
         assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
         assert!(body.contains(r#""error":"internal""#));
+    }
+
+    #[tokio::test]
+    async fn invalid_project_maps_to_400() {
+        let err = HttpError::Memory(MemoryError::InvalidProject("bad".into()));
+        let (status, body) = body_string(err.into_response()).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(body.contains(r#""error":"bad_request""#));
+        assert!(body.contains("bad"));
     }
 }

@@ -1,8 +1,7 @@
-//! Memory Manager Actor — supervisor for the memory sub-system.
+//! Supervisor for the memory sub-system.
 //!
-//! Spawns and supervises long-lived Storage and Indexer child actors.
-//! For each incoming FileOp or Search message, spawns a short-lived
-//! child actor to handle the request pipeline.
+//! Spawns and supervises long-lived Storage and Indexer child actors. For each incoming FileOp
+//! or Search message, spawns a short-lived child actor to handle the request pipeline.
 
 use std::path::PathBuf;
 
@@ -271,6 +270,7 @@ mod tests {
         addr.send(FileOpWrite {
             username: "alice".to_string(),
             agent_id,
+            project: None,
             filename: "test.md".to_string(),
             content: "Hello from test".to_string(),
         })
@@ -285,6 +285,7 @@ mod tests {
             .send(FileOpRead {
                 username: "alice".to_string(),
                 agent_id,
+                project: None,
                 filename: "test.md".to_string(),
             })
             .await
@@ -298,6 +299,7 @@ mod tests {
         addr.send(FileOpDelete {
             username: "alice".to_string(),
             agent_id,
+            project: None,
             filename: "test.md".to_string(),
         })
         .await
@@ -311,6 +313,7 @@ mod tests {
             .send(FileOpRead {
                 username: "alice".to_string(),
                 agent_id,
+                project: None,
                 filename: "test.md".to_string(),
             })
             .await
@@ -333,6 +336,7 @@ mod tests {
         addr.send(FileOpWrite {
             username: "alice".to_string(),
             agent_id,
+            project: None,
             filename: "notes.md".to_string(),
             content: "Rust programming language is great".to_string(),
         })
@@ -347,6 +351,8 @@ mod tests {
                 username: "alice".to_string(),
                 agent_id,
                 query: "programming".to_string(),
+                scope: crate::memory::message::SearchScope::All,
+                raw_only: false,
             })
             .await
             .unwrap()
@@ -371,6 +377,7 @@ mod tests {
         addr.send(FileOpWrite {
             username: "alice".to_string(),
             agent_id,
+            project: None,
             filename: "first.md".to_string(),
             content: "Some content for synthesis".to_string(),
         })

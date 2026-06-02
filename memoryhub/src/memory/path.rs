@@ -1,13 +1,14 @@
 //! Path derivation utilities for the Memory Manager.
 //!
-//! Raw layout: `{username}/{agent_id}/{filename}`. The agent embeds any sub-path directly in
-//! `filename` by flattening every `/` and `\` in it to `_` so the result is a single path
-//! segment.
+//! Raw layout: `{username}/{agent_id}/{project}/{filename}`. `project` defaults to `_default`
+//! when omitted. The agent embeds any sub-path directly in `filename` by flattening every `/` and
+//! `\` in it to `_` so the result is a single path segment.
 //!
-//! Synthesized layout: `[{username}/]_synthesized/YYYY-MM-DD-{n}.md`. Each synthesis run writes to
-//! the greatest existing file (ordered by date then numeric suffix) in the target folder, or
-//! creates a fresh `{today}-01.md`, and rolls over to the next suffix when the current file is
-//! already at or above the configured size cap.
+//! Synthesized layout: `[{username}/[{agent_id}/]]_synthesized/YYYY-MM-DD-{n}.md` — per-agent,
+//! per-user, and cross-user (global) targets respectively. Each synthesis run writes to the
+//! greatest existing file (ordered by date then numeric suffix) in the target folder, or creates a
+//! fresh `{today}-01.md`, and rolls over to the next suffix when the current file is already at or
+//! above the configured size cap.
 
 use std::path::{Path, PathBuf};
 
@@ -15,27 +16,62 @@ use chrono::NaiveDate;
 use tokio::fs;
 use uuid::Uuid;
 
+use super::error::MemoryError;
 use crate::llm::SynthesisTarget;
 
-/// Derive the storage path for a raw memory file.
+/// Project bucket used when the caller omits `project`.
+const DEFAULT_PROJECT: &str = "_default";
+
+/// Reserved segment names a caller may not use as a project.
+const RESERVED_PROJECTS: [&str; 2] = ["_synthesized", DEFAULT_PROJECT];
+
+/// Validate and resolve a caller-supplied project into its path segment.
 ///
-/// Any `/` or `\` inside `filename` is replaced with `_` so the original
-/// name collapses to a single segment.
-#[inline]
-pub fn get_raw_path(username: &str, agent_id: Uuid, filename: &str) -> String {
-    format!(
-        "{}/{}/{}",
+/// `None`/empty → `_default`. Rejects a value containing `/` or `\`, or equal
+/// to a reserved name.
+pub fn resolve_project(project: Option<&str>) -> Result<String, MemoryError> {
+    match project.map(str::trim) {
+        None | Some("") => Ok(DEFAULT_PROJECT.to_string()),
+        Some(p) if p.contains('/') || p.contains('\\') => Err(MemoryError::InvalidProject(
+            format!("project must be a single path segment, got {}", p),
+        )),
+        Some(p) if RESERVED_PROJECTS.contains(&p) => Err(MemoryError::InvalidProject(format!(
+            "project name {} is reserved",
+            p
+        ))),
+        Some(p) => Ok(p.to_string()),
+    }
+}
+
+/// Derive the storage path for a raw memory file:
+/// `{username}/{agent_id}/{project}/{flattened_filename}`.
+///
+/// `project` is validated via [`resolve_project`]; `filename`'s `/` and `\` are
+/// flattened to `_`.
+pub fn get_raw_path(
+    username: &str,
+    agent_id: Uuid,
+    project: Option<&str>,
+    filename: &str,
+) -> Result<String, MemoryError> {
+    let project = resolve_project(project)?;
+    Ok(format!(
+        "{}/{}/{}/{}",
         username,
         agent_id,
+        project,
         filename.replace(['/', '\\'], "_")
-    )
+    ))
 }
 
 /// Relative folder (under `memory_dir`) where synthesized files for `target` live.
 #[inline]
 fn synthesis_folder(target: &SynthesisTarget) -> String {
     match target {
-        SynthesisTarget::User(u) => format!("{}/_synthesized", u),
+        SynthesisTarget::Agent { username, agent_id } => {
+            format!("{}/{}/_synthesized", username, agent_id)
+        }
+        SynthesisTarget::User { username } => format!("{}/_synthesized", username),
         SynthesisTarget::Global => "_synthesized".to_string(),
     }
 }
@@ -150,6 +186,7 @@ fn next_filename(current: &str, today: &str) -> String {
 mod tests {
     use std::fs;
 
+    use super::super::error::MemoryError;
     use super::*;
 
     fn date(y: i32, m: u32, d: u32) -> NaiveDate {
@@ -159,27 +196,42 @@ mod tests {
     #[test]
     fn simple_filename_path() {
         let agent_id = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440000").unwrap();
-        let path = get_raw_path("alice", agent_id, "2026-03-31.md");
+        let path = get_raw_path("alice", agent_id, Some("notes"), "2026-03-31.md").unwrap();
         assert_eq!(
             path,
-            "alice/550e8400-e29b-41d4-a716-446655440000/2026-03-31.md"
+            "alice/550e8400-e29b-41d4-a716-446655440000/notes/2026-03-31.md"
         );
     }
 
     #[test]
-    fn filename_with_slash_is_flattened() {
+    fn filename_with_slash_is_flattened_and_default_project() {
         let agent_id = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440000").unwrap();
-        let path = get_raw_path("alice", agent_id, "notes/2026-03-31.md");
+        let path = get_raw_path("alice", agent_id, None, "notes/2026-03-31.md").unwrap();
         assert_eq!(
             path,
-            "alice/550e8400-e29b-41d4-a716-446655440000/notes_2026-03-31.md"
+            "alice/550e8400-e29b-41d4-a716-446655440000/_default/notes_2026-03-31.md"
         );
+        let path = get_raw_path("alice", agent_id, None, "notes\\2026-03-31.md").unwrap();
+        assert_eq!(
+            path,
+            "alice/550e8400-e29b-41d4-a716-446655440000/_default/notes_2026-03-31.md"
+        );
+    }
 
-        let path = get_raw_path("alice", agent_id, "notes\\2026-03-31.md");
-        assert_eq!(
-            path,
-            "alice/550e8400-e29b-41d4-a716-446655440000/notes_2026-03-31.md"
-        );
+    #[tokio::test]
+    async fn synthesis_path_for_agent_target() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = current_synthesis_path(
+            dir.path(),
+            &SynthesisTarget::Agent {
+                username: "alice".into(),
+                agent_id: "agent1".into(),
+            },
+            date(2026, 5, 20),
+            1_048_576,
+        )
+        .await;
+        assert_eq!(path, "alice/agent1/_synthesized/2026-05-20-01.md");
     }
 
     #[tokio::test]
@@ -187,7 +239,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = current_synthesis_path(
             dir.path(),
-            &SynthesisTarget::User("alice".into()),
+            &SynthesisTarget::User {
+                username: "alice".into(),
+            },
             date(2026, 5, 20),
             1_048_576,
         )
@@ -213,7 +267,9 @@ mod tests {
 
         let path = current_synthesis_path(
             dir.path(),
-            &SynthesisTarget::User("alice".into()),
+            &SynthesisTarget::User {
+                username: "alice".into(),
+            },
             date(2026, 5, 20),
             1024,
         )
@@ -231,7 +287,9 @@ mod tests {
 
         let path = current_synthesis_path(
             dir.path(),
-            &SynthesisTarget::User("alice".into()),
+            &SynthesisTarget::User {
+                username: "alice".into(),
+            },
             date(2026, 5, 20),
             1024,
         )
@@ -248,7 +306,9 @@ mod tests {
 
         let path = current_synthesis_path(
             dir.path(),
-            &SynthesisTarget::User("alice".into()),
+            &SynthesisTarget::User {
+                username: "alice".into(),
+            },
             date(2026, 5, 20),
             1024,
         )
@@ -265,16 +325,57 @@ mod tests {
         fs::write(folder.join("2026-05-20-01.md"), b"b").unwrap();
         fs::write(folder.join("2026-05-20-02.md"), b"c").unwrap();
 
-        let path =
-            get_latest_synthesis_file(dir.path(), &SynthesisTarget::User("alice".into())).await;
+        let path = get_latest_synthesis_file(
+            dir.path(),
+            &SynthesisTarget::User {
+                username: "alice".into(),
+            },
+        )
+        .await;
         assert_eq!(path.as_deref(), Some("alice/_synthesized/2026-05-20-02.md"));
     }
 
     #[tokio::test]
     async fn latest_synthesis_path_returns_none_when_empty() {
         let dir = tempfile::tempdir().unwrap();
-        let path =
-            get_latest_synthesis_file(dir.path(), &SynthesisTarget::User("alice".into())).await;
+        let path = get_latest_synthesis_file(
+            dir.path(),
+            &SynthesisTarget::User {
+                username: "alice".into(),
+            },
+        )
+        .await;
         assert!(path.is_none());
+    }
+
+    #[test]
+    fn resolve_project_defaults_when_absent() {
+        assert_eq!(resolve_project(None).unwrap(), "_default");
+        assert_eq!(resolve_project(Some("")).unwrap(), "_default");
+    }
+
+    #[test]
+    fn resolve_project_accepts_plain_name() {
+        assert_eq!(resolve_project(Some("memoryhub")).unwrap(), "memoryhub");
+    }
+
+    #[test]
+    fn resolve_project_rejects_separators_and_reserved() {
+        assert!(matches!(
+            resolve_project(Some("a/b")),
+            Err(MemoryError::InvalidProject(_))
+        ));
+        assert!(matches!(
+            resolve_project(Some("a\\b")),
+            Err(MemoryError::InvalidProject(_))
+        ));
+        assert!(matches!(
+            resolve_project(Some("_synthesized")),
+            Err(MemoryError::InvalidProject(_))
+        ));
+        assert!(matches!(
+            resolve_project(Some("_default")),
+            Err(MemoryError::InvalidProject(_))
+        ));
     }
 }

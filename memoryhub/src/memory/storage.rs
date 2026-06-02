@@ -1,7 +1,4 @@
-//! Storage Actor — filesystem I/O for plain Markdown files.
-//!
-//! Dumb path-based filesystem wrapper. Knows nothing about memory types,
-//! SQLite, or search. Writes use atomic write-to-temp-then-rename.
+//! Storage memory files as markdown files on disk.
 
 use std::path::PathBuf;
 

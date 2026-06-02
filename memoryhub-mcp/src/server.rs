@@ -24,6 +24,12 @@ use crate::identity;
 pub struct SearchArgs {
     /// What to search your memory for.
     pub query: String,
+    /// Search scope: "all" (default, whole team), "user", or "agent".
+    #[serde(default)]
+    pub scope: Option<String>,
+    /// When true, exclude synthesized summaries and search raw memories only.
+    #[serde(default)]
+    pub raw_only: bool,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -31,6 +37,9 @@ pub struct SaveArgs {
     /// Absolute path to a memory file the agent has written. The absolute path is used as the
     /// stored filename; the model does not name the memory.
     pub path: String,
+    /// Optional project bucket to group this memory under (defaults to `_default`).
+    #[serde(default)]
+    pub project: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -67,22 +76,27 @@ pub enum SaveError {
 pub async fn do_search(
     client: &MemoryHubClient,
     agent_id: Uuid,
+    scope: Option<&str>,
+    raw_only: bool,
     query: &str,
 ) -> Result<String, ClientError> {
-    Ok(format_search(&client.search(agent_id, query).await?))
+    Ok(format_search(
+        &client.search(agent_id, scope, raw_only, query).await?,
+    ))
 }
 
 pub async fn do_save(
     client: &MemoryHubClient,
     agent_id: Uuid,
     path: &str,
+    project: Option<&str>,
 ) -> Result<String, SaveError> {
     if !Path::new(path).is_absolute() {
         return Err(SaveError::NotAbsolute);
     }
     let content =
         fs::read_to_string(path).map_err(|e| SaveError::Io(format!("{}: {}", path, e)))?;
-    client.write(agent_id, path, &content).await?;
+    client.write(agent_id, project, path, &content).await?;
 
     Ok(format!("Saved memory '{}'.", path))
 }
@@ -149,7 +163,15 @@ impl McpServer {
         ctx: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, McpError> {
         let agent_id = self.agent_id(&ctx).await;
-        match do_search(&self.client, agent_id, &args.query).await {
+        match do_search(
+            &self.client,
+            agent_id,
+            args.scope.as_deref(),
+            args.raw_only,
+            &args.query,
+        )
+        .await
+        {
             Ok(text) => Ok(CallToolResult::success(vec![Content::text(text)])),
             Err(e) => Err(McpError::internal_error(e.to_string(), None)),
         }
@@ -166,7 +188,7 @@ impl McpServer {
         ctx: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, McpError> {
         let agent_id = self.agent_id(&ctx).await;
-        match do_save(&self.client, agent_id, &args.path).await {
+        match do_save(&self.client, agent_id, &args.path, args.project.as_deref()).await {
             Ok(text) => Ok(CallToolResult::success(vec![Content::text(text)])),
             Err(e) => Err(McpError::internal_error(e.to_string(), None)),
         }
@@ -243,7 +265,9 @@ mod tests {
             .mount(&server)
             .await;
         let client = MemoryHubClient::new(server.uri(), "mh_tok".into());
-        let out = do_search(&client, Uuid::new_v4(), "hello").await.unwrap();
+        let out = do_search(&client, Uuid::new_v4(), None, false, "hello")
+            .await
+            .unwrap();
         assert!(out.contains("alice/abc/notes.md"));
         assert!(out.contains("hello world"));
     }
@@ -262,14 +286,14 @@ mod tests {
         let abs = file.to_str().unwrap();
 
         let client = MemoryHubClient::new(server.uri(), "mh_tok".into());
-        let msg = do_save(&client, Uuid::new_v4(), abs).await.unwrap();
+        let msg = do_save(&client, Uuid::new_v4(), abs, None).await.unwrap();
         assert_eq!(msg, format!("Saved memory '{}'.", abs));
     }
 
     #[tokio::test]
     async fn do_save_rejects_relative_path() {
         let client = MemoryHubClient::new("http://127.0.0.1:1".into(), "t".into());
-        let err = do_save(&client, Uuid::new_v4(), "relative/x.md")
+        let err = do_save(&client, Uuid::new_v4(), "relative/x.md", None)
             .await
             .unwrap_err();
         assert!(matches!(err, SaveError::NotAbsolute));

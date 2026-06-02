@@ -10,12 +10,14 @@ use tokio::fs;
 
 use super::error::LlmError;
 
+const DEFAULT_PER_AGENT: &str = include_str!("prompts/per_agent.md");
 const DEFAULT_PER_USER: &str = include_str!("prompts/per_user.md");
 const DEFAULT_GLOBAL: &str = include_str!("prompts/global.md");
 
 /// Which synthesis prompt a task uses.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TemplateKind {
+    PerAgent,
     PerUser,
     Global,
 }
@@ -23,6 +25,7 @@ pub enum TemplateKind {
 impl TemplateKind {
     fn filename(self) -> &'static str {
         match self {
+            TemplateKind::PerAgent => "per_agent.md",
             TemplateKind::PerUser => "per_user.md",
             TemplateKind::Global => "global.md",
         }
@@ -31,6 +34,7 @@ impl TemplateKind {
     /// Default template content compiled into the binary.
     pub fn default_content(self) -> &'static str {
         match self {
+            TemplateKind::PerAgent => DEFAULT_PER_AGENT,
             TemplateKind::PerUser => DEFAULT_PER_USER,
             TemplateKind::Global => DEFAULT_GLOBAL,
         }
@@ -71,7 +75,11 @@ pub async fn write_default_templates(prompts_dir: &Path) -> Result<(), LlmError>
     fs::create_dir_all(prompts_dir)
         .await
         .map_err(LlmError::WriteDefaultTemplates)?;
-    for kind in [TemplateKind::PerUser, TemplateKind::Global] {
+    for kind in [
+        TemplateKind::PerAgent,
+        TemplateKind::PerUser,
+        TemplateKind::Global,
+    ] {
         let path = prompts_dir.join(kind.filename());
         if !path.exists() {
             fs::write(&path, kind.default_content())

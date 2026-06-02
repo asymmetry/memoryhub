@@ -1,20 +1,19 @@
-//! Synthesizer Actor — long-lived child of MemoryManager.
+//! Synthesize the memory files into summaries.
 //!
-//! Receives fire-and-forget `FileChanged` notifications, batches them with a
-//! cool-down timer, then runs a two-pass synthesis. The per-user pass folds
-//! each affected user's changed files into that user's running summary; the
-//! global pass folds the changed per-user summaries into a cross-user
-//! summary. Synthesis itself is delegated to LLM Service via `Synthesize`;
-//! this actor only reads sources, writes results, and indexes them.
+//! Receives fire-and-forget `FileChanged` notifications, batches them with a cool-down timer,
+//! then runs a three-pass synthesis.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use acktor::{Actor, ActorContext, Address, Context, Handler, Message, utils::debug_trace};
+use acktor::{
+    Actor, ActorContext, Address, Context, ErrorReport, Handler, Message, utils::debug_trace,
+};
+use ahash::{HashMap, HashSet};
 use chrono::Utc;
-use tokio::time::Instant;
-use tracing::{debug, info, trace, warn};
+use tracing::{debug, info, warn};
+use uuid::Uuid;
 
 use super::chunking::chunk_text;
 use super::config::MemoryConfig;
@@ -34,8 +33,8 @@ pub struct Synthesizer {
     storage: Address<Storage>,
     index: Address<Indexer>,
     config: MemoryConfig,
-    pending: BTreeSet<String>,
-    last_event: Option<Instant>,
+    changed_files: HashSet<FileChanged>,
+    timer_armed: bool,
 }
 
 impl Synthesizer {
@@ -50,8 +49,8 @@ impl Synthesizer {
             storage,
             index,
             config,
-            pending: BTreeSet::new(),
-            last_event: None,
+            changed_files: HashSet::default(),
+            timer_armed: false,
         }
     }
 
@@ -63,65 +62,98 @@ impl Synthesizer {
         Duration::from_secs(self.config.synthesizer_cooldown_secs)
     }
 
-    /// Run the two-pass synthesis over the pending set.
+    /// Run the three-tier cascade over the pending set.
     async fn process(&mut self) {
-        if self.pending.is_empty() {
+        if self.changed_files.is_empty() {
             return;
         }
-        let paths: Vec<String> = std::mem::take(&mut self.pending).into_iter().collect();
+        let changed_files = std::mem::take(&mut self.changed_files);
 
-        debug!("Synthesizer: processing {} pending paths", paths.len());
+        debug!(
+            "Synthesizer: processing {} pending paths",
+            changed_files.len()
+        );
 
-        // Group the changed paths by owning user.
-        let mut by_user: BTreeMap<String, Vec<String>> = BTreeMap::new();
-        for path in paths {
-            match path.split('/').next() {
-                Some(u) if !u.is_empty() && u != "_synthesized" => {
-                    by_user.entry(u.to_string()).or_default().push(path);
+        let mut file_groups: HashMap<(String, Uuid), BTreeSet<String>> = HashMap::default();
+        let mut agent_groups: HashMap<String, BTreeSet<Uuid>> = HashMap::default();
+        let mut users: BTreeSet<String> = BTreeSet::default();
+
+        for file in changed_files {
+            file_groups
+                .entry((file.username, file.agent_id))
+                .or_default()
+                .insert(file.path);
+        }
+
+        // Pass 1: per-agent.
+        for ((username, agent_id), changed_files) in &file_groups {
+            match self
+                .synthesize_agent(username, *agent_id, changed_files)
+                .await
+            {
+                Ok(true) => {
+                    agent_groups
+                        .entry(username.clone())
+                        .or_default()
+                        .insert(*agent_id);
                 }
-                _ => {}
-            }
-        }
-
-        // Per-user pass.
-        let mut changed_users: Vec<String> = Vec::new();
-        for (user, changed) in &by_user {
-            match self.synthesize_user(user, changed).await {
-                Ok(true) => changed_users.push(user.clone()),
                 Ok(false) => {}
-                Err(e) => warn!("Synthesizer: per-user synthesis for {} failed: {}", user, e),
+                Err(e) => warn!(
+                    "Synthesizer: per-agent synthesis for {}/{} failed: {}",
+                    username,
+                    agent_id,
+                    e.report()
+                ),
             }
         }
 
-        // Global pass.
-        if !changed_users.is_empty()
-            && let Err(e) = self.synthesize_global(&changed_users).await
+        // Pass 2: per-user.
+        for (username, agent_ids) in &agent_groups {
+            match self.synthesize_user(username, agent_ids).await {
+                Ok(true) => {
+                    users.insert(username.clone());
+                }
+                Ok(false) => {}
+                Err(e) => warn!(
+                    "Synthesizer: per-user synthesis for {} failed: {}",
+                    username,
+                    e.report()
+                ),
+            }
+        }
+
+        // Pass 3: global.
+        if !users.is_empty()
+            && let Err(e) = self.synthesize_global(&users).await
         {
-            warn!("Synthesizer: global synthesis failed: {}", e);
+            warn!("Synthesizer: global synthesis failed: {}", e.report());
         }
     }
 
-    async fn synthesize_user(&self, user: &str, changed: &[String]) -> Result<bool, MemoryError> {
+    /// Pass 1: fold an agent's changed raw files into its per-agent summary.
+    async fn synthesize_agent(
+        &self,
+        username: &str,
+        agent_id: Uuid,
+        changed_files: &BTreeSet<String>,
+    ) -> Result<bool, MemoryError> {
         let mut sources = Vec::new();
         let mut deleted = Vec::new();
-        for path in changed {
-            match self.storage_read(path).await? {
+
+        for file in changed_files {
+            match self.storage_read(file).await? {
                 Some(content) => sources.push(SourceDoc {
-                    name: path.clone(),
+                    name: file.clone(),
                     content,
                 }),
-                None => deleted.push(path.clone()),
+                None => deleted.push(file.clone()),
             }
         }
         if sources.is_empty() && deleted.is_empty() {
             return Ok(false);
         }
+
         if !deleted.is_empty() {
-            trace!(
-                "Synthesizer: {} source(s) deleted for {}",
-                deleted.len(),
-                user
-            );
             sources.push(SourceDoc {
                 name: "_deleted_sources".to_string(),
                 content: format!(
@@ -131,7 +163,10 @@ impl Synthesizer {
             });
         }
 
-        let target = SynthesisTarget::User(user.to_string());
+        let target = SynthesisTarget::Agent {
+            username: username.to_string(),
+            agent_id: agent_id.to_string(),
+        };
         let prior_summary = match get_latest_synthesis_file(&self.memory_dir(), &target).await {
             Some(path) => self.storage_read(&path).await?,
             None => None,
@@ -139,27 +174,85 @@ impl Synthesizer {
         let synthesis = self
             .request_synthesis(target.clone(), prior_summary, sources)
             .await?;
-        let today = Utc::now().date_naive();
+
         let summary_path = current_synthesis_path(
             &self.memory_dir(),
             &target,
-            today,
+            Utc::now().date_naive(),
             self.config.synthesis_max_file_bytes,
         )
         .await;
         self.write_synthesis(&summary_path, &synthesis).await?;
+
+        info!(
+            "Synthesizer: per-agent synthesis written to {}",
+            summary_path
+        );
+
+        Ok(true)
+    }
+
+    /// Pass 2: fold the changed agents' summaries into the user's summary.
+    async fn synthesize_user(
+        &self,
+        username: &str,
+        agent_ids: &BTreeSet<Uuid>,
+    ) -> Result<bool, MemoryError> {
+        let mut sources = Vec::new();
+        for agent_id in agent_ids {
+            let target = SynthesisTarget::Agent {
+                username: username.to_string(),
+                agent_id: agent_id.to_string(),
+            };
+            let Some(path) = get_latest_synthesis_file(&self.memory_dir(), &target).await else {
+                continue;
+            };
+            if let Some(content) = self.storage_read(&path).await? {
+                sources.push(SourceDoc {
+                    name: path,
+                    content,
+                });
+            }
+        }
+        if sources.is_empty() {
+            return Ok(false);
+        }
+
+        let target = SynthesisTarget::User {
+            username: username.to_string(),
+        };
+        let prior_summary = match get_latest_synthesis_file(&self.memory_dir(), &target).await {
+            Some(path) => self.storage_read(&path).await?,
+            None => None,
+        };
+        let synthesis = self
+            .request_synthesis(target.clone(), prior_summary, sources)
+            .await?;
+
+        let summary_path = current_synthesis_path(
+            &self.memory_dir(),
+            &target,
+            Utc::now().date_naive(),
+            self.config.synthesis_max_file_bytes,
+        )
+        .await;
+        self.write_synthesis(&summary_path, &synthesis).await?;
+
         info!(
             "Synthesizer: per-user synthesis written to {}",
             summary_path
         );
+
         Ok(true)
     }
 
-    /// Synthesize the cross-user summary from the changed per-user summaries.
-    async fn synthesize_global(&self, changed_users: &[String]) -> Result<(), MemoryError> {
+    /// Pass 3: fold the changed users' summaries into the global summary.
+    async fn synthesize_global(&self, changed_users: &BTreeSet<String>) -> Result<(), MemoryError> {
         let mut sources = Vec::new();
         for user in changed_users {
-            let user_target = SynthesisTarget::User(user.clone());
+            let user_target = SynthesisTarget::User {
+                username: user.clone(),
+            };
             let Some(path) = get_latest_synthesis_file(&self.memory_dir(), &user_target).await
             else {
                 continue;
@@ -183,16 +276,18 @@ impl Synthesizer {
         let synthesis = self
             .request_synthesis(SynthesisTarget::Global, prior_summary, sources)
             .await?;
-        let today = Utc::now().date_naive();
+
         let summary_path = current_synthesis_path(
             &self.memory_dir(),
             &SynthesisTarget::Global,
-            today,
+            Utc::now().date_naive(),
             self.config.synthesis_max_file_bytes,
         )
         .await;
         self.write_synthesis(&summary_path, &synthesis).await?;
+
         info!("Synthesizer: global synthesis written to {}", summary_path);
+
         Ok(())
     }
 
@@ -305,28 +400,28 @@ impl Handler<FileChanged> for Synthesizer {
     async fn handle(&mut self, msg: FileChanged, ctx: &mut Self::Context) {
         debug_trace!("Handle command {:?}", msg);
 
-        self.pending.insert(msg.rel_path);
-        self.last_event = Some(Instant::now());
+        self.changed_files.insert(msg);
 
-        let addr = ctx.address().clone();
-        let cooldown = self.cooldown();
-        tokio::spawn(async move {
-            tokio::time::sleep(cooldown).await;
-            let _ = addr.do_send(CooldownTick).await;
-        });
+        if !self.timer_armed {
+            self.timer_armed = true;
+
+            let addr = ctx.address();
+            let cooldown = self.cooldown();
+            tokio::spawn(async move {
+                tokio::time::sleep(cooldown).await;
+                let _ = addr.do_send(CooldownTick).await;
+            });
+        }
     }
 }
 
 impl Handler<CooldownTick> for Synthesizer {
     type Result = ();
 
-    async fn handle(&mut self, _msg: CooldownTick, _ctx: &mut Self::Context) {
-        debug_trace!("Handle command {:?}", _msg);
+    async fn handle(&mut self, msg: CooldownTick, _ctx: &mut Self::Context) {
+        debug_trace!("Handle command {:?}", msg);
 
-        let should_process = matches!(self.last_event, Some(t) if t.elapsed() >= self.cooldown());
-        if !should_process {
-            return;
-        }
+        self.timer_armed = false;
         self.process().await;
     }
 }
@@ -362,12 +457,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn synthesizer_writes_synthesis_after_cooldown() {
+    async fn synthesizer_writes_all_three_tiers() {
         let (storage, index, llm, dir, _handles) = boot().await;
+
+        let agent_id = Uuid::new_v4();
+        let rel_path = format!("alice/{}/proj/x.md", agent_id);
 
         storage
             .send(StorageWrite {
-                path: "alice/agent1/x.md".to_string(),
+                path: rel_path.clone(),
                 content: "hello world".to_string(),
             })
             .await
@@ -386,35 +484,29 @@ mod tests {
         let (addr, _handle) = synth.start("synth").unwrap();
 
         addr.send(FileChanged {
-            rel_path: "alice/agent1/x.md".to_string(),
+            username: "alice".to_string(),
+            agent_id,
+            path: rel_path,
         })
         .await
         .unwrap()
         .await
         .unwrap();
 
-        tokio::time::sleep(Duration::from_millis(200)).await;
+        tokio::time::sleep(Duration::from_millis(300)).await;
 
-        let folder = dir.path().join("alice").join("_synthesized");
-        assert!(
-            folder.is_dir(),
-            "expected _synthesized folder at {:?}",
-            folder
-        );
-        let entries: Vec<_> = std::fs::read_dir(&folder)
-            .unwrap()
-            .filter_map(|e| e.ok())
-            .filter(|e| {
-                e.path()
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .is_some_and(|s| s.ends_with(".md"))
-            })
-            .collect();
-        assert!(
-            !entries.is_empty(),
-            "expected at least one dated synthesis file in {:?}",
-            folder
-        );
+        for folder in [
+            dir.path().join(format!("alice/{}/_synthesized", agent_id)),
+            dir.path().join("alice/_synthesized"),
+            dir.path().join("_synthesized"),
+        ] {
+            let has_md = std::fs::read_dir(&folder)
+                .map(|rd| {
+                    rd.filter_map(|e| e.ok())
+                        .any(|e| e.path().extension().and_then(|x| x.to_str()) == Some("md"))
+                })
+                .unwrap_or(false);
+            assert!(has_md, "expected a synthesis file in {:?}", folder);
+        }
     }
 }

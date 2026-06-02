@@ -1,7 +1,7 @@
-//! Content chunking for the Memory Manager.
+//! Chunk the memory files for embedding and indexing.
 //!
-//! Splits Markdown content into overlapping line-based chunks. Each chunk
-//! tracks its 1-indexed start and end line numbers in the original file.
+//! Splits Markdown content into overlapping line-based chunks. Each chunk tracks its 1-indexed
+//! start and end line numbers in the original file.
 
 /// A raw text chunk before embedding.
 #[derive(Debug, Clone)]

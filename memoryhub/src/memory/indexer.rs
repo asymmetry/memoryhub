@@ -1,12 +1,10 @@
-//! Indexer and search text chunks.
+//! Index and search the text chunks.
 //!
 //! The Indexer actor manages a SQLite database with two main tables: `files` and `chunks`. The
 //! `files` table tracks metadata about each file (path, source, size, updated_at). The `chunks`
 //! table stores the text chunks with their path, line numbers, and embedding model. A virtual
 //! FTS5 table `chunks_fts` enables full-text search on chunk text. A virtual table `chunks_vec`
-//! (sqlite-vec) stores the chunk embeddings for efficient vector search. The Indexer actor handles
-//! insert, delete, and search operations, running blocking DB operations in `spawn_blocking` to
-//! avoid blocking the async runtime.
+//! (sqlite-vec) stores the chunk embeddings for efficient vector search.
 
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -16,7 +14,9 @@ use chrono::Utc;
 use rusqlite::{Connection, params};
 
 use super::error::IndexError;
-use super::message::{EnsureVecReady, IndexDelete, IndexInsert, IndexSearch, SearchResult};
+use super::message::{
+    EnsureVecReady, IndexDelete, IndexInsert, IndexSearch, SearchResult, SearchScope,
+};
 
 /// The Indexer actor. Owns a shared SQLite connection.
 pub struct Indexer {
@@ -271,31 +271,34 @@ fn do_delete(conn: &Connection, path: &str) -> Result<(), IndexError> {
     tx.execute("DELETE FROM files WHERE path = ?1", params![path])?;
 
     tx.commit()?;
+
     Ok(())
 }
 
 fn do_search(conn: &Connection, msg: &IndexSearch) -> Result<Vec<SearchResult>, IndexError> {
-    let path_prefix = format!("{}/%", msg.username);
-    let mut all_results: Vec<SearchResult> = Vec::new();
+    let path_prefix = match msg.scope {
+        SearchScope::All => "%".to_string(),
+        SearchScope::User => format!("{}/%", msg.username),
+        SearchScope::Agent => format!("{}/{}/%", msg.username, msg.agent_id),
+    };
+    let source_clause = if msg.raw_only {
+        " AND f.source = 'raw'"
+    } else {
+        ""
+    };
+    let sql = format!(
+        "SELECT cv.chunk_id, cv.distance, c.path, c.start_line, c.end_line, c.text
+         FROM chunks_vec cv
+         JOIN chunks c ON c.id = cv.chunk_id
+         JOIN files f ON f.path = c.path
+         WHERE cv.embedding MATCH ?1 AND k = ?2 AND c.path LIKE ?3{source_clause}
+         ORDER BY cv.distance ASC"
+    );
 
+    let mut all_results: Vec<SearchResult> = Vec::new();
     for emb in &msg.embeddings {
         let blob = vec_to_blob(&emb.0);
-        let mut stmt = conn.prepare(
-            "SELECT
-                cv.chunk_id,
-                cv.distance,
-                c.path,
-                c.start_line,
-                c.end_line,
-                c.text
-            FROM chunks_vec cv
-            JOIN chunks c ON c.id = cv.chunk_id
-            WHERE cv.embedding MATCH ?1
-              AND k = ?2
-              AND c.path LIKE ?3
-            ORDER BY cv.distance ASC",
-        )?;
-
+        let mut stmt = conn.prepare(&sql)?;
         let rows = stmt.query_map(params![blob, msg.limit as i64, path_prefix], |row| {
             Ok(SearchResult {
                 path: row.get(2)?,
@@ -308,16 +311,13 @@ fn do_search(conn: &Connection, msg: &IndexSearch) -> Result<Vec<SearchResult>, 
                 snippet: row.get(5)?,
             })
         })?;
-
         for row in rows {
             all_results.push(row?);
         }
     }
 
-    // Sort by score descending, deduplicate by path+start_line, truncate to limit.
     all_results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap());
     all_results.truncate(msg.limit);
-
     Ok(all_results)
 }
 
@@ -445,6 +445,8 @@ mod tests {
                 embeddings: vec![Embedding(vec![0.0; 128])],
                 username: "alice".to_string(),
                 agent_id: Uuid::parse_str("00000000-0000-0000-0000-000000000001").unwrap(),
+                scope: super::super::message::SearchScope::User,
+                raw_only: false,
                 limit: 10,
             })
             .await
@@ -501,6 +503,8 @@ mod tests {
                 embeddings: vec![Embedding(vec![0.0; 128])],
                 username: "alice".to_string(),
                 agent_id: Uuid::parse_str("00000000-0000-0000-0000-000000000001").unwrap(),
+                scope: super::super::message::SearchScope::User,
+                raw_only: false,
                 limit: 10,
             })
             .await
@@ -567,6 +571,8 @@ mod tests {
                 embeddings: vec![Embedding(vec![0.0; 128])],
                 username: "alice".to_string(),
                 agent_id: Uuid::parse_str("00000000-0000-0000-0000-000000000001").unwrap(),
+                scope: super::super::message::SearchScope::User,
+                raw_only: false,
                 limit: 10,
             })
             .await
@@ -594,5 +600,106 @@ mod tests {
             .unwrap();
 
         assert!(result.is_ok());
+    }
+
+    async fn seed_two_users(addr: &acktor::Address<Indexer>) {
+        addr.send(EnsureVecReady { dim: 128 })
+            .await
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap();
+        for (path, source) in [
+            ("alice/agent1/proj/a.md", "raw"),
+            ("alice/_synthesized/2026-05-20-01.md", "synthesized"),
+            ("bob/agent9/proj/b.md", "raw"),
+        ] {
+            addr.send(IndexInsert {
+                path: path.to_string(),
+                source: source.to_string(),
+                size: 10,
+                model: "mock".to_string(),
+                chunks: vec![Chunk {
+                    text: "shared topic".to_string(),
+                    start_line: 1,
+                    end_line: 1,
+                    embedding: Embedding(vec![0.0; 128]),
+                }],
+            })
+            .await
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap();
+        }
+    }
+
+    fn alice() -> Uuid {
+        Uuid::parse_str("00000000-0000-0000-0000-000000000001").unwrap()
+    }
+
+    async fn run_search(
+        addr: &acktor::Address<Indexer>,
+        scope: super::super::message::SearchScope,
+        raw_only: bool,
+    ) -> Vec<SearchResult> {
+        addr.send(IndexSearch {
+            embeddings: vec![Embedding(vec![0.0; 128])],
+            username: "alice".to_string(),
+            agent_id: alice(),
+            scope,
+            raw_only,
+            limit: 50,
+        })
+        .await
+        .unwrap()
+        .await
+        .unwrap()
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn scope_all_spans_every_user() {
+        use super::super::message::SearchScope;
+        let (addr, _h) = test_index().start("ix").unwrap();
+        seed_two_users(&addr).await;
+        let paths: Vec<String> = run_search(&addr, SearchScope::All, false)
+            .await
+            .into_iter()
+            .map(|r| r.path)
+            .collect();
+        assert!(paths.iter().any(|p| p.starts_with("alice/agent1/")));
+        assert!(paths.iter().any(|p| p.starts_with("bob/")));
+        assert!(
+            paths
+                .iter()
+                .any(|p| p == "alice/_synthesized/2026-05-20-01.md")
+        );
+    }
+
+    #[tokio::test]
+    async fn scope_user_and_raw_only() {
+        use super::super::message::SearchScope;
+        let (addr, _h) = test_index().start("ix").unwrap();
+        seed_two_users(&addr).await;
+
+        let user_paths: Vec<String> = run_search(&addr, SearchScope::User, false)
+            .await
+            .into_iter()
+            .map(|r| r.path)
+            .collect();
+        assert!(user_paths.iter().all(|p| p.starts_with("alice/")));
+        assert!(user_paths.iter().any(|p| p.contains("_synthesized")));
+
+        let raw_paths: Vec<String> = run_search(&addr, SearchScope::User, true)
+            .await
+            .into_iter()
+            .map(|r| r.path)
+            .collect();
+        assert!(
+            raw_paths
+                .iter()
+                .all(|p| p.starts_with("alice/") && !p.contains("_synthesized"))
+        );
     }
 }

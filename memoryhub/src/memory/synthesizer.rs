@@ -418,8 +418,8 @@ impl Handler<FileChanged> for Synthesizer {
 impl Handler<CooldownTick> for Synthesizer {
     type Result = ();
 
-    async fn handle(&mut self, msg: CooldownTick, _ctx: &mut Self::Context) {
-        debug_trace!("Handle command {:?}", msg);
+    async fn handle(&mut self, _msg: CooldownTick, _ctx: &mut Self::Context) {
+        debug_trace!("Handle command {:?}", _msg);
 
         self.timer_armed = false;
         self.process().await;

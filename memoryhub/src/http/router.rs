@@ -11,7 +11,9 @@ use uuid::Uuid;
 use super::error::HttpError;
 use super::middleware::{AuthUser, auth_middleware};
 use super::{HttpServerState, admin};
-use crate::memory::message::{FileOpDelete, FileOpRead, FileOpWrite, Search, SearchResult};
+use crate::memory::message::{
+    FileOpDelete, FileOpRead, FileOpWrite, Search, SearchResult, SearchScope,
+};
 
 pub fn build_router(state: HttpServerState) -> Router {
     // Protected routes: everything under /v1 except /health. The middleware runs via
@@ -74,8 +76,13 @@ pub struct DeleteRequest {
 
 #[derive(Debug, Deserialize)]
 pub struct SearchRequest {
-    pub agent_id: Uuid,
+    #[serde(default)]
+    pub agent_id: Option<Uuid>,
     pub query: String,
+    #[serde(default)]
+    pub scope: SearchScope,
+    #[serde(default)]
+    pub raw_only: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -166,8 +173,10 @@ pub async fn search_memory(
 ) -> Result<Json<SearchResponse>, HttpError> {
     let msg = Search {
         username: user.username,
-        agent_id: req.agent_id,
+        agent_id: req.agent_id.unwrap_or_else(Uuid::nil),
         query: req.query,
+        scope: req.scope,
+        raw_only: req.raw_only,
     };
     let results = state
         .memory_manager
@@ -220,13 +229,21 @@ mod tests {
     }
 
     #[test]
-    fn search_request_deserializes() {
-        let json = r#"{
-            "agent_id": "550e8400-e29b-41d4-a716-446655440000",
-            "query": "rust"
-        }"#;
+    fn search_request_defaults_scope_all() {
+        let json = r#"{"query":"rust"}"#;
         let req: SearchRequest = serde_json::from_str(json).unwrap();
         assert_eq!(req.query, "rust");
+        assert_eq!(req.scope, SearchScope::All);
+        assert!(!req.raw_only);
+        assert!(req.agent_id.is_none());
+    }
+
+    #[test]
+    fn search_request_parses_scope_and_raw_only() {
+        let json = r#"{"agent_id":"550e8400-e29b-41d4-a716-446655440000","query":"x","scope":"agent","raw_only":true}"#;
+        let req: SearchRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.scope, SearchScope::Agent);
+        assert!(req.raw_only);
     }
 
     #[test]

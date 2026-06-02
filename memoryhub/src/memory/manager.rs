@@ -352,6 +352,8 @@ mod tests {
                 username: "alice".to_string(),
                 agent_id,
                 query: "programming".to_string(),
+                scope: crate::memory::message::SearchScope::All,
+                raw_only: false,
             })
             .await
             .unwrap()

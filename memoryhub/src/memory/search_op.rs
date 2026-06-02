@@ -69,6 +69,8 @@ impl Handler<Search> for SearchOp {
                 embeddings,
                 username: msg.username,
                 agent_id: msg.agent_id,
+                scope: msg.scope,
+                raw_only: msg.raw_only,
                 limit: 20,
             })
             .await?

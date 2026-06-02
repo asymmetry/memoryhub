@@ -15,6 +15,19 @@ use crate::memory::error::{IndexError, MemoryError, StorageError};
 // Shared types
 // ---------------------------------------------------------------------------
 
+/// Identity scope for a search request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SearchScope {
+    /// Whole store, across every user (plus the global summary).
+    #[default]
+    All,
+    /// The caller's user: `{username}/%`.
+    User,
+    /// The caller's user+agent: `{username}/{agent_id}/%`.
+    Agent,
+}
+
 /// A chunk of text extracted from a memory file, with its embedding vector.
 #[derive(Debug)]
 pub struct Chunk {
@@ -101,6 +114,8 @@ pub struct IndexSearch {
     pub embeddings: Vec<Embedding>,
     pub username: String,
     pub agent_id: Uuid,
+    pub scope: SearchScope,
+    pub raw_only: bool,
     pub limit: usize,
 }
 
@@ -146,6 +161,8 @@ pub struct Search {
     pub username: String,
     pub agent_id: Uuid,
     pub query: String,
+    pub scope: SearchScope,
+    pub raw_only: bool,
 }
 
 // ---------------------------------------------------------------------------

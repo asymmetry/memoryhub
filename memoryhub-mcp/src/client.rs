@@ -23,6 +23,8 @@ pub enum ClientError {
 #[derive(Debug, Serialize)]
 struct WriteRequest<'a> {
     agent_id: Uuid,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    project: Option<&'a str>,
     filename: &'a str,
     content: &'a str,
 }
@@ -42,6 +44,10 @@ struct ReadResponse {
 struct SearchRequest<'a> {
     agent_id: Uuid,
     query: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    scope: Option<&'a str>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    raw_only: bool,
 }
 
 /// One search hit (mirrors `SearchResult` in `memoryhub`).
@@ -109,9 +115,19 @@ impl MemoryHubClient {
         &self,
         agent_id: Uuid,
         query: &str,
+        scope: Option<&str>,
+        raw_only: bool,
     ) -> Result<Vec<SearchResult>, ClientError> {
         let resp = self
-            .post("/v1/memories/search", &SearchRequest { agent_id, query })
+            .post(
+                "/v1/memories/search",
+                &SearchRequest {
+                    agent_id,
+                    query,
+                    scope,
+                    raw_only,
+                },
+            )
             .await?;
         let resp = Self::ensure_ok(resp).await?;
         let parsed: SearchResponse = resp
@@ -125,6 +141,7 @@ impl MemoryHubClient {
     pub async fn write(
         &self,
         agent_id: Uuid,
+        project: Option<&str>,
         filename: &str,
         content: &str,
     ) -> Result<(), ClientError> {
@@ -133,6 +150,7 @@ impl MemoryHubClient {
                 "/v1/memories/write",
                 &WriteRequest {
                     agent_id,
+                    project,
                     filename,
                     content,
                 },
@@ -192,7 +210,7 @@ mod tests {
             .await;
 
         let client = MemoryHubClient::new(server.uri(), "mh_tok".into());
-        let results = client.search(agent(), "hello").await.unwrap();
+        let results = client.search(agent(), "hello", None, false).await.unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].path, "alice/abc/notes.md");
     }
@@ -206,7 +224,7 @@ mod tests {
             .mount(&server)
             .await;
         let client = MemoryHubClient::new(server.uri(), "mh_tok".into());
-        client.write(agent(), "notes.md", "hi").await.unwrap();
+        client.write(agent(), None, "notes.md", "hi").await.unwrap();
     }
 
     #[tokio::test]
@@ -244,7 +262,7 @@ mod tests {
             .mount(&server)
             .await;
         let client = MemoryHubClient::new(server.uri(), "bad".into());
-        let err = client.search(agent(), "q").await.unwrap_err();
+        let err = client.search(agent(), "q", None, false).await.unwrap_err();
         assert!(matches!(err, ClientError::Unauthorized));
     }
 
@@ -252,7 +270,7 @@ mod tests {
     async fn unreachable_maps_to_error() {
         // Nothing listening on this port.
         let client = MemoryHubClient::new("http://127.0.0.1:1".into(), "t".into());
-        let err = client.search(agent(), "q").await.unwrap_err();
+        let err = client.search(agent(), "q", None, false).await.unwrap_err();
         assert!(matches!(err, ClientError::Unreachable(_)));
     }
 }

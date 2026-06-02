@@ -24,6 +24,9 @@ use super::template::{TemplateKind, load_template};
 /// Identifies both the long-lived task to route to and the prompt template kind.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum SynthesisTarget {
+    /// Per-agent synthesis; folds an agent's raw files. `agent_id` is the
+    /// path segment form (the UUID's string), not a parsed `Uuid`.
+    Agent { username: String, agent_id: String },
     /// Per-user synthesis; the `String` is the username.
     User(String),
     /// Cross-user synthesis.
@@ -34,6 +37,7 @@ impl SynthesisTarget {
     /// Prompt template kind for this target.
     pub fn template_kind(&self) -> TemplateKind {
         match self {
+            SynthesisTarget::Agent { .. } => TemplateKind::PerAgent,
             SynthesisTarget::User(_) => TemplateKind::PerUser,
             SynthesisTarget::Global => TemplateKind::Global,
         }
@@ -42,6 +46,9 @@ impl SynthesisTarget {
     /// Stable actor label for this target.
     pub fn label(&self) -> String {
         match self {
+            SynthesisTarget::Agent { username, agent_id } => {
+                format!("syn-task-{}-{}", username, agent_id)
+            }
             SynthesisTarget::User(u) => format!("syn-task-{}", u),
             SynthesisTarget::Global => "syn-task-global".to_string(),
         }
@@ -345,6 +352,16 @@ mod tests {
         let call = mock.last_chat_call().unwrap();
         assert_eq!(call[0].role, Role::System);
         assert_eq!(call[0].content, TemplateKind::PerUser.default_content());
+    }
+
+    #[test]
+    fn agent_target_label_and_kind() {
+        let t = SynthesisTarget::Agent {
+            username: "alice".into(),
+            agent_id: "agent1".into(),
+        };
+        assert_eq!(t.label(), "syn-task-alice-agent1");
+        assert_eq!(t.template_kind(), TemplateKind::PerAgent);
     }
 
     #[tokio::test]

@@ -35,6 +35,9 @@ pub fn get_raw_path(username: &str, agent_id: Uuid, filename: &str) -> String {
 #[inline]
 fn synthesis_folder(target: &SynthesisTarget) -> String {
     match target {
+        SynthesisTarget::Agent { username, agent_id } => {
+            format!("{}/{}/_synthesized", username, agent_id)
+        }
         SynthesisTarget::User(u) => format!("{}/_synthesized", u),
         SynthesisTarget::Global => "_synthesized".to_string(),
     }
@@ -180,6 +183,22 @@ mod tests {
             path,
             "alice/550e8400-e29b-41d4-a716-446655440000/notes_2026-03-31.md"
         );
+    }
+
+    #[tokio::test]
+    async fn synthesis_path_for_agent_target() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = current_synthesis_path(
+            dir.path(),
+            &SynthesisTarget::Agent {
+                username: "alice".into(),
+                agent_id: "agent1".into(),
+            },
+            date(2026, 5, 20),
+            1_048_576,
+        )
+        .await;
+        assert_eq!(path, "alice/agent1/_synthesized/2026-05-20-01.md");
     }
 
     #[tokio::test]

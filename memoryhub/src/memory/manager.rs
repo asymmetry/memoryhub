@@ -1,8 +1,7 @@
-//! Memory Manager Actor — supervisor for the memory sub-system.
+//! Supervisor for the memory sub-system.
 //!
-//! Spawns and supervises long-lived Storage and Indexer child actors.
-//! For each incoming FileOp or Search message, spawns a short-lived
-//! child actor to handle the request pipeline.
+//! Spawns and supervises long-lived Storage and Indexer child actors. For each incoming FileOp
+//! or Search message, spawns a short-lived child actor to handle the request pipeline.
 
 use std::path::PathBuf;
 

@@ -27,8 +27,8 @@ pub enum SynthesisTarget {
     /// Per-agent synthesis; folds an agent's raw files. `agent_id` is the
     /// path segment form (the UUID's string), not a parsed `Uuid`.
     Agent { username: String, agent_id: String },
-    /// Per-user synthesis; the `String` is the username.
-    User(String),
+    /// Per-user synthesis.
+    User { username: String },
     /// Cross-user synthesis.
     Global,
 }
@@ -38,7 +38,7 @@ impl SynthesisTarget {
     pub fn template_kind(&self) -> TemplateKind {
         match self {
             SynthesisTarget::Agent { .. } => TemplateKind::PerAgent,
-            SynthesisTarget::User(_) => TemplateKind::PerUser,
+            SynthesisTarget::User { .. } => TemplateKind::PerUser,
             SynthesisTarget::Global => TemplateKind::Global,
         }
     }
@@ -47,9 +47,10 @@ impl SynthesisTarget {
     pub fn label(&self) -> String {
         match self {
             SynthesisTarget::Agent { username, agent_id } => {
-                format!("syn-task-{}-{}", username, agent_id)
+                let short = &agent_id[..agent_id.len().min(4)];
+                format!("syn-task-{}-{}", username, short)
             }
-            SynthesisTarget::User(u) => format!("syn-task-{}", u),
+            SynthesisTarget::User { username } => format!("syn-task-{}", username),
             SynthesisTarget::Global => "syn-task-global".to_string(),
         }
     }
@@ -236,7 +237,9 @@ mod tests {
             .unwrap();
 
         addr.send(Synthesize {
-            target: SynthesisTarget::User("alice".into()),
+            target: SynthesisTarget::User {
+                username: "alice".into(),
+            },
             prior_summary: Some("PRIOR-SUMMARY".into()),
             sources: vec![doc("a.md", "new content")],
         })
@@ -272,7 +275,9 @@ mod tests {
 
         for (n, text) in [(1, "cycle-1"), (2, "cycle-2")] {
             addr.send(Synthesize {
-                target: SynthesisTarget::User("alice".into()),
+                target: SynthesisTarget::User {
+                    username: "alice".into(),
+                },
                 prior_summary: None,
                 sources: vec![doc("a.md", text)],
             })
@@ -299,7 +304,9 @@ mod tests {
         let (addr, _h) = task(mock.clone(), &dir, 1).start("synth-test").unwrap();
 
         addr.send(Synthesize {
-            target: SynthesisTarget::User("alice".into()),
+            target: SynthesisTarget::User {
+                username: "alice".into(),
+            },
             prior_summary: None,
             sources: vec![doc("a.md", "first")],
         })
@@ -310,7 +317,9 @@ mod tests {
         .unwrap();
 
         addr.send(Synthesize {
-            target: SynthesisTarget::User("alice".into()),
+            target: SynthesisTarget::User {
+                username: "alice".into(),
+            },
             prior_summary: Some("RESEED".into()),
             sources: vec![doc("b.md", "second")],
         })
@@ -339,7 +348,9 @@ mod tests {
         // With no on-disk template, the embedded default must be used and the
         // synthesis must succeed instead of returning LlmError::Config.
         addr.send(Synthesize {
-            target: SynthesisTarget::User("alice".into()),
+            target: SynthesisTarget::User {
+                username: "alice".into(),
+            },
             prior_summary: None,
             sources: vec![doc("a.md", "x")],
         })
@@ -360,7 +371,7 @@ mod tests {
             username: "alice".into(),
             agent_id: "agent1".into(),
         };
-        assert_eq!(t.label(), "syn-task-alice-agent1");
+        assert_eq!(t.label(), "syn-task-alice-agen");
         assert_eq!(t.template_kind(), TemplateKind::PerAgent);
     }
 

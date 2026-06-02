@@ -1,7 +1,8 @@
-//! File operation actors.
+//! File operations.
 //!
-//! Spawned by the Memory Manager for each incoming FileOp message. Coordinates between Storage,
-//! Indexer, and the LLM Service, then terminates.
+//! Spawned by the [`MemoryManager`][super::MemoryManager] for each incoming `FileOp` message.
+//! Coordinates between Storage, the Indexer, and the Synthesizer to execute the requested
+//! operation, then terminates.
 
 use acktor::{Actor, Address, Context, ErrorReport, Handler, utils::debug_trace};
 use tracing::{error, warn};
@@ -149,7 +150,9 @@ impl Handler<FileOpWrite> for FileOp {
         if let Err(e) = self
             .synthesizer
             .do_send(FileChanged {
-                rel_path: storage_path.clone(),
+                username: msg.username.clone(),
+                agent_id: msg.agent_id,
+                path: storage_path.clone(),
             })
             .await
         {
@@ -229,7 +232,9 @@ impl Handler<FileOpDelete> for FileOp {
         if let Err(e) = self
             .synthesizer
             .do_send(FileChanged {
-                rel_path: storage_path.clone(),
+                username: msg.username.clone(),
+                agent_id: msg.agent_id,
+                path: storage_path.clone(),
             })
             .await
         {

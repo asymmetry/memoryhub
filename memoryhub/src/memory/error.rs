@@ -1,4 +1,4 @@
-//! Error types for the Memory Manager sub-system.
+//! Error types for the memory sub-system.
 
 use std::path::PathBuf;
 
@@ -28,7 +28,7 @@ pub enum IndexError {
     DimensionMismatch { stored: usize, received: usize },
 }
 
-/// Top-level error for Memory Manager operations.
+/// Top-level error for memory operations.
 #[derive(Debug, Error)]
 pub enum MemoryError {
     #[error(transparent)]

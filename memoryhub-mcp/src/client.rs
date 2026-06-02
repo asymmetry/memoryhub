@@ -43,11 +43,11 @@ struct ReadResponse {
 #[derive(Debug, Serialize)]
 struct SearchRequest<'a> {
     agent_id: Uuid,
-    query: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
     scope: Option<&'a str>,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     raw_only: bool,
+    query: &'a str,
 }
 
 /// One search hit (mirrors `SearchResult` in `memoryhub`).
@@ -114,18 +114,18 @@ impl MemoryHubClient {
     pub async fn search(
         &self,
         agent_id: Uuid,
-        query: &str,
         scope: Option<&str>,
         raw_only: bool,
+        query: &str,
     ) -> Result<Vec<SearchResult>, ClientError> {
         let resp = self
             .post(
                 "/v1/memories/search",
                 &SearchRequest {
                     agent_id,
-                    query,
                     scope,
                     raw_only,
+                    query,
                 },
             )
             .await?;
@@ -210,7 +210,7 @@ mod tests {
             .await;
 
         let client = MemoryHubClient::new(server.uri(), "mh_tok".into());
-        let results = client.search(agent(), "hello", None, false).await.unwrap();
+        let results = client.search(agent(), None, false, "hello").await.unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].path, "alice/abc/notes.md");
     }
@@ -262,7 +262,7 @@ mod tests {
             .mount(&server)
             .await;
         let client = MemoryHubClient::new(server.uri(), "bad".into());
-        let err = client.search(agent(), "q", None, false).await.unwrap_err();
+        let err = client.search(agent(), None, false, "q").await.unwrap_err();
         assert!(matches!(err, ClientError::Unauthorized));
     }
 
@@ -270,7 +270,7 @@ mod tests {
     async fn unreachable_maps_to_error() {
         // Nothing listening on this port.
         let client = MemoryHubClient::new("http://127.0.0.1:1".into(), "t".into());
-        let err = client.search(agent(), "q", None, false).await.unwrap_err();
+        let err = client.search(agent(), None, false, "q").await.unwrap_err();
         assert!(matches!(err, ClientError::Unreachable(_)));
     }
 }

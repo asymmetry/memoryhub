@@ -1,12 +1,10 @@
-//! Indexer and search text chunks.
+//! Index and search the text chunks.
 //!
 //! The Indexer actor manages a SQLite database with two main tables: `files` and `chunks`. The
 //! `files` table tracks metadata about each file (path, source, size, updated_at). The `chunks`
 //! table stores the text chunks with their path, line numbers, and embedding model. A virtual
 //! FTS5 table `chunks_fts` enables full-text search on chunk text. A virtual table `chunks_vec`
-//! (sqlite-vec) stores the chunk embeddings for efficient vector search. The Indexer actor handles
-//! insert, delete, and search operations, running blocking DB operations in `spawn_blocking` to
-//! avoid blocking the async runtime.
+//! (sqlite-vec) stores the chunk embeddings for efficient vector search.
 
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -16,7 +14,9 @@ use chrono::Utc;
 use rusqlite::{Connection, params};
 
 use super::error::IndexError;
-use super::message::{EnsureVecReady, IndexDelete, IndexInsert, IndexSearch, SearchResult};
+use super::message::{
+    EnsureVecReady, IndexDelete, IndexInsert, IndexSearch, SearchResult, SearchScope,
+};
 
 /// The Indexer actor. Owns a shared SQLite connection.
 pub struct Indexer {
@@ -271,11 +271,11 @@ fn do_delete(conn: &Connection, path: &str) -> Result<(), IndexError> {
     tx.execute("DELETE FROM files WHERE path = ?1", params![path])?;
 
     tx.commit()?;
+
     Ok(())
 }
 
 fn do_search(conn: &Connection, msg: &IndexSearch) -> Result<Vec<SearchResult>, IndexError> {
-    use super::message::SearchScope;
     let path_prefix = match msg.scope {
         SearchScope::All => "%".to_string(),
         SearchScope::User => format!("{}/%", msg.username),

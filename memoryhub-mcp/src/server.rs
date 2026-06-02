@@ -76,12 +76,12 @@ pub enum SaveError {
 pub async fn do_search(
     client: &MemoryHubClient,
     agent_id: Uuid,
-    query: &str,
     scope: Option<&str>,
     raw_only: bool,
+    query: &str,
 ) -> Result<String, ClientError> {
     Ok(format_search(
-        &client.search(agent_id, query, scope, raw_only).await?,
+        &client.search(agent_id, scope, raw_only, query).await?,
     ))
 }
 
@@ -166,9 +166,9 @@ impl McpServer {
         match do_search(
             &self.client,
             agent_id,
-            &args.query,
             args.scope.as_deref(),
             args.raw_only,
+            &args.query,
         )
         .await
         {
@@ -265,7 +265,7 @@ mod tests {
             .mount(&server)
             .await;
         let client = MemoryHubClient::new(server.uri(), "mh_tok".into());
-        let out = do_search(&client, Uuid::new_v4(), "hello", None, false)
+        let out = do_search(&client, Uuid::new_v4(), None, false, "hello")
             .await
             .unwrap();
         assert!(out.contains("alice/abc/notes.md"));

@@ -174,9 +174,9 @@ pub async fn search_memory(
     let msg = Search {
         username: user.username,
         agent_id: req.agent_id.unwrap_or_else(Uuid::nil),
-        query: req.query,
         scope: req.scope,
         raw_only: req.raw_only,
+        query: req.query,
     };
     let results = state
         .memory_manager

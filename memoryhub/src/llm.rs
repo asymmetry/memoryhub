@@ -202,7 +202,9 @@ mod tests {
 
         let reply = addr
             .send(Synthesize {
-                target: crate::llm::SynthesisTarget::User("alice".into()),
+                target: crate::llm::SynthesisTarget::User {
+                    username: "alice".into(),
+                },
                 prior_summary: None,
                 sources: vec![crate::llm::SourceDoc {
                     name: "alice/a/x.md".into(),

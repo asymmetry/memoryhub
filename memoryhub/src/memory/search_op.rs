@@ -1,7 +1,7 @@
-//! Search Actor.
+//! Search operation.
 //!
-//! Spawned by the Memory Manager for each incoming Search message. Chunks the query, embeds via
-//! the LLM Service, searches the Indexer, then terminates.
+//! Spawned by the [`MemoryManager`][super::MemoryManager] for each incoming [`Search`] message.
+//! Chunks the query, embeds via the LLM Service, searches the Indexer, then terminates.
 
 use acktor::{Actor, Address, Context, Handler, utils::debug_trace};
 

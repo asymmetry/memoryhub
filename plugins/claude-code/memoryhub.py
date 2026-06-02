@@ -74,9 +74,15 @@ def get_filename(path: Path) -> str:
     return str(path.relative_to(PROJECTS_DIR))
 
 
-def push_one(config: dict, path: Path, filename: str | None = None) -> tuple[bool, str | None]:
-    if filename is None:
-        filename = get_filename(path)
+def split_project_filename(path: Path) -> tuple[str, str]:
+    # rel = {project_hash}/memory/<...>.md  ->  ("{project_hash}", "memory/<...>.md")
+    rel = path.relative_to(PROJECTS_DIR)
+    parts = rel.parts
+    return parts[0], str(Path(*parts[1:]))
+
+
+def push_one(config: dict, path: Path) -> tuple[bool, str | None]:
+    project, filename = split_project_filename(path)
 
     try:
         with open(path, errors="replace") as f:
@@ -87,6 +93,7 @@ def push_one(config: dict, path: Path, filename: str | None = None) -> tuple[boo
     payload = json.dumps(
         {
             "agent_id": config["agent_id"],
+            "project": project,
             "filename": filename,
             "content": content,
         }

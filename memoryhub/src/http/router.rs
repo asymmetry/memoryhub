@@ -45,6 +45,8 @@ pub fn build_router(state: HttpServerState) -> Router {
 #[derive(Debug, Deserialize)]
 pub struct WriteRequest {
     pub agent_id: Uuid,
+    #[serde(default)]
+    pub project: Option<String>,
     pub filename: String,
     pub content: String,
 }
@@ -52,6 +54,8 @@ pub struct WriteRequest {
 #[derive(Debug, Deserialize)]
 pub struct ReadRequest {
     pub agent_id: Uuid,
+    #[serde(default)]
+    pub project: Option<String>,
     pub filename: String,
 }
 
@@ -63,6 +67,8 @@ pub struct ReadResponse {
 #[derive(Debug, Deserialize)]
 pub struct DeleteRequest {
     pub agent_id: Uuid,
+    #[serde(default)]
+    pub project: Option<String>,
     pub filename: String,
 }
 
@@ -94,6 +100,7 @@ pub async fn write_memory(
     let msg = FileOpWrite {
         username: user.username,
         agent_id: req.agent_id,
+        project: req.project,
         filename: req.filename,
         content: req.content,
     };
@@ -115,6 +122,7 @@ pub async fn read_memory(
     let msg = FileOpRead {
         username: user.username,
         agent_id: req.agent_id,
+        project: req.project,
         filename: req.filename,
     };
     let content = state
@@ -138,6 +146,7 @@ pub async fn delete_memory(
     let msg = FileOpDelete {
         username: user.username,
         agent_id: req.agent_id,
+        project: req.project,
         filename: req.filename,
     };
     state
@@ -184,6 +193,20 @@ mod tests {
         let req: WriteRequest = serde_json::from_str(json).unwrap();
         assert_eq!(req.filename, "2026-05-13.md");
         assert_eq!(req.content, "hello");
+    }
+
+    #[test]
+    fn write_request_without_project_defaults_none() {
+        let json = r#"{"agent_id":"550e8400-e29b-41d4-a716-446655440000","filename":"x.md","content":"hi"}"#;
+        let req: WriteRequest = serde_json::from_str(json).unwrap();
+        assert!(req.project.is_none());
+    }
+
+    #[test]
+    fn write_request_with_project() {
+        let json = r#"{"agent_id":"550e8400-e29b-41d4-a716-446655440000","project":"p","filename":"x.md","content":"hi"}"#;
+        let req: WriteRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.project.as_deref(), Some("p"));
     }
 
     #[test]

@@ -39,8 +39,8 @@ All bodies are JSON; all routes nest under `/v1`. `filename` is opaque — any `
 | ---------- | ---------------------------------------- | ----------------------------------------- | ----------------------------------------------- |
 | Public     | `GET /v1/health`                         | —                                         | `{"status":"ok"}`                               |
 | User       | `POST /v1/memories/write`                | `{agent_id, project?, filename, content}` | `{}`                                            |
-| User       | `POST /v1/memories/read`                 | `{agent_id, filename}`                    | `{"content":…}` or 404                          |
-| User       | `POST /v1/memories/delete`               | `{agent_id, filename}`                    | `{}`                                            |
+| User       | `POST /v1/memories/read`                 | `{agent_id, project?, filename}`          | `{"content":…}` or 404                          |
+| User       | `POST /v1/memories/delete`               | `{agent_id, project?, filename}`          | `{}`                                            |
 | User       | `POST /v1/memories/search`               | `{agent_id?, scope?, raw_only?, query}`   | `{"results":[…]}`                               |
 | User       | `GET /v1/me`                             | —                                         | `{username, role}`                              |
 | Admin      | `POST /v1/admin/users`                   | `{username, role}`                        | create user                                     |

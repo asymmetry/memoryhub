@@ -271,6 +271,7 @@ mod tests {
         addr.send(FileOpWrite {
             username: "alice".to_string(),
             agent_id,
+            project: None,
             filename: "test.md".to_string(),
             content: "Hello from test".to_string(),
         })
@@ -285,6 +286,7 @@ mod tests {
             .send(FileOpRead {
                 username: "alice".to_string(),
                 agent_id,
+                project: None,
                 filename: "test.md".to_string(),
             })
             .await
@@ -298,6 +300,7 @@ mod tests {
         addr.send(FileOpDelete {
             username: "alice".to_string(),
             agent_id,
+            project: None,
             filename: "test.md".to_string(),
         })
         .await
@@ -311,6 +314,7 @@ mod tests {
             .send(FileOpRead {
                 username: "alice".to_string(),
                 agent_id,
+                project: None,
                 filename: "test.md".to_string(),
             })
             .await
@@ -333,6 +337,7 @@ mod tests {
         addr.send(FileOpWrite {
             username: "alice".to_string(),
             agent_id,
+            project: None,
             filename: "notes.md".to_string(),
             content: "Rust programming language is great".to_string(),
         })
@@ -371,6 +376,7 @@ mod tests {
         addr.send(FileOpWrite {
             username: "alice".to_string(),
             agent_id,
+            project: None,
             filename: "first.md".to_string(),
             content: "Some content for synthesis".to_string(),
         })

@@ -41,18 +41,25 @@ pub fn resolve_project(project: Option<&str>) -> Result<String, MemoryError> {
     }
 }
 
-/// Derive the storage path for a raw memory file.
+/// Derive the storage path for a raw memory file:
+/// `{username}/{agent_id}/{project}/{flattened_filename}`.
 ///
-/// Any `/` or `\` inside `filename` is replaced with `_` so the original
-/// name collapses to a single segment.
-#[inline]
-pub fn get_raw_path(username: &str, agent_id: Uuid, filename: &str) -> String {
-    format!(
-        "{}/{}/{}",
+/// `project` is validated via [`resolve_project`]; `filename`'s `/` and `\` are
+/// flattened to `_`.
+pub fn get_raw_path(
+    username: &str,
+    agent_id: Uuid,
+    project: Option<&str>,
+    filename: &str,
+) -> Result<String, MemoryError> {
+    let project = resolve_project(project)?;
+    Ok(format!(
+        "{}/{}/{}/{}",
         username,
         agent_id,
+        project,
         filename.replace(['/', '\\'], "_")
-    )
+    ))
 }
 
 /// Relative folder (under `memory_dir`) where synthesized files for `target` live.
@@ -187,26 +194,25 @@ mod tests {
     #[test]
     fn simple_filename_path() {
         let agent_id = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440000").unwrap();
-        let path = get_raw_path("alice", agent_id, "2026-03-31.md");
+        let path = get_raw_path("alice", agent_id, Some("notes"), "2026-03-31.md").unwrap();
         assert_eq!(
             path,
-            "alice/550e8400-e29b-41d4-a716-446655440000/2026-03-31.md"
+            "alice/550e8400-e29b-41d4-a716-446655440000/notes/2026-03-31.md"
         );
     }
 
     #[test]
-    fn filename_with_slash_is_flattened() {
+    fn filename_with_slash_is_flattened_and_default_project() {
         let agent_id = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440000").unwrap();
-        let path = get_raw_path("alice", agent_id, "notes/2026-03-31.md");
+        let path = get_raw_path("alice", agent_id, None, "notes/2026-03-31.md").unwrap();
         assert_eq!(
             path,
-            "alice/550e8400-e29b-41d4-a716-446655440000/notes_2026-03-31.md"
+            "alice/550e8400-e29b-41d4-a716-446655440000/_default/notes_2026-03-31.md"
         );
-
-        let path = get_raw_path("alice", agent_id, "notes\\2026-03-31.md");
+        let path = get_raw_path("alice", agent_id, None, "notes\\2026-03-31.md").unwrap();
         assert_eq!(
             path,
-            "alice/550e8400-e29b-41d4-a716-446655440000/notes_2026-03-31.md"
+            "alice/550e8400-e29b-41d4-a716-446655440000/_default/notes_2026-03-31.md"
         );
     }
 

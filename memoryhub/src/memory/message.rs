@@ -114,6 +114,7 @@ pub struct IndexSearch {
 pub struct FileOpWrite {
     pub username: String,
     pub agent_id: Uuid,
+    pub project: Option<String>,
     pub filename: String,
     pub content: String,
 }
@@ -124,6 +125,7 @@ pub struct FileOpWrite {
 pub struct FileOpRead {
     pub username: String,
     pub agent_id: Uuid,
+    pub project: Option<String>,
     pub filename: String,
 }
 
@@ -133,6 +135,7 @@ pub struct FileOpRead {
 pub struct FileOpDelete {
     pub username: String,
     pub agent_id: Uuid,
+    pub project: Option<String>,
     pub filename: String,
 }
 
@@ -178,6 +181,7 @@ mod tests {
         let msg = FileOpWrite {
             username: "alice".to_string(),
             agent_id: Uuid::new_v4(),
+            project: Some("proj".to_string()),
             filename: "2026-03-31.md".to_string(),
             content: "hello".to_string(),
         };

@@ -64,7 +64,12 @@ impl Handler<FileOpWrite> for FileOp {
     ) -> Result<(), MemoryError> {
         debug_trace!("Handle command {:?}", msg);
 
-        let storage_path = get_raw_path(&msg.username, msg.agent_id, &msg.filename);
+        let storage_path = get_raw_path(
+            &msg.username,
+            msg.agent_id,
+            msg.project.as_deref(),
+            &msg.filename,
+        )?;
 
         // 1. Write to Storage.
         self.storage
@@ -169,7 +174,12 @@ impl Handler<FileOpRead> for FileOp {
     ) -> Result<Option<String>, MemoryError> {
         debug_trace!("Handle command {:?}", msg);
 
-        let storage_path = get_raw_path(&msg.username, msg.agent_id, &msg.filename);
+        let storage_path = get_raw_path(
+            &msg.username,
+            msg.agent_id,
+            msg.project.as_deref(),
+            &msg.filename,
+        )?;
 
         let content = self
             .storage
@@ -191,7 +201,12 @@ impl Handler<FileOpDelete> for FileOp {
     ) -> Result<(), MemoryError> {
         debug_trace!("Handle command {:?}", msg);
 
-        let storage_path = get_raw_path(&msg.username, msg.agent_id, &msg.filename);
+        let storage_path = get_raw_path(
+            &msg.username,
+            msg.agent_id,
+            msg.project.as_deref(),
+            &msg.filename,
+        )?;
 
         // Delete from Indexer first.
         self.index

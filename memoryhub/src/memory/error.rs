@@ -40,6 +40,9 @@ pub enum MemoryError {
     #[error(transparent)]
     Llm(#[from] crate::llm::LlmError),
 
+    #[error("invalid project: {0}")]
+    InvalidProject(String),
+
     #[error("could not send message")]
     SendError(#[source] BoxError),
 

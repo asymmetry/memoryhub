@@ -15,7 +15,31 @@ use chrono::NaiveDate;
 use tokio::fs;
 use uuid::Uuid;
 
+use super::error::MemoryError;
 use crate::llm::SynthesisTarget;
+
+/// Project bucket used when the caller omits `project`.
+pub const DEFAULT_PROJECT: &str = "_default";
+
+/// Reserved segment names a caller may not use as a project.
+const RESERVED_PROJECTS: [&str; 2] = ["_synthesized", DEFAULT_PROJECT];
+
+/// Validate and resolve a caller-supplied project into its path segment.
+///
+/// `None`/empty → `_default`. Rejects a value containing `/` or `\`, or equal
+/// to a reserved name.
+pub fn resolve_project(project: Option<&str>) -> Result<String, MemoryError> {
+    match project.map(str::trim) {
+        None | Some("") => Ok(DEFAULT_PROJECT.to_string()),
+        Some(p) if p.contains('/') || p.contains('\\') => Err(MemoryError::InvalidProject(
+            format!("project must be a single path segment, got {p:?}"),
+        )),
+        Some(p) if RESERVED_PROJECTS.contains(&p) => Err(MemoryError::InvalidProject(format!(
+            "project name {p:?} is reserved"
+        ))),
+        Some(p) => Ok(p.to_string()),
+    }
+}
 
 /// Derive the storage path for a raw memory file.
 ///
@@ -153,6 +177,7 @@ fn next_filename(current: &str, today: &str) -> String {
 mod tests {
     use std::fs;
 
+    use super::super::error::MemoryError;
     use super::*;
 
     fn date(y: i32, m: u32, d: u32) -> NaiveDate {
@@ -295,5 +320,36 @@ mod tests {
         let path =
             get_latest_synthesis_file(dir.path(), &SynthesisTarget::User("alice".into())).await;
         assert!(path.is_none());
+    }
+
+    #[test]
+    fn resolve_project_defaults_when_absent() {
+        assert_eq!(resolve_project(None).unwrap(), "_default");
+        assert_eq!(resolve_project(Some("")).unwrap(), "_default");
+    }
+
+    #[test]
+    fn resolve_project_accepts_plain_name() {
+        assert_eq!(resolve_project(Some("memoryhub")).unwrap(), "memoryhub");
+    }
+
+    #[test]
+    fn resolve_project_rejects_separators_and_reserved() {
+        assert!(matches!(
+            resolve_project(Some("a/b")),
+            Err(MemoryError::InvalidProject(_))
+        ));
+        assert!(matches!(
+            resolve_project(Some("a\\b")),
+            Err(MemoryError::InvalidProject(_))
+        ));
+        assert!(matches!(
+            resolve_project(Some("_synthesized")),
+            Err(MemoryError::InvalidProject(_))
+        ));
+        assert!(matches!(
+            resolve_project(Some("_default")),
+            Err(MemoryError::InvalidProject(_))
+        ));
     }
 }

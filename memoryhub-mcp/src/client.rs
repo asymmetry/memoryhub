@@ -4,21 +4,7 @@ use reqwest::Response;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-/// Errors from a MemoryHub API call.
-#[derive(Debug, thiserror::Error)]
-pub enum ClientError {
-    #[error("authentication failed — check MEMORYHUB_TOKEN")]
-    Unauthorized,
-
-    #[error("cannot reach MemoryHub at {0}")]
-    Unreachable(String),
-
-    #[error("MemoryHub returned {status}: {body}")]
-    Http { status: u16, body: String },
-
-    #[error("unexpected response from MemoryHub: {0}")]
-    Decode(String),
-}
+use crate::error::ClientError;
 
 #[derive(Debug, Serialize)]
 struct WriteRequest<'a> {
@@ -32,6 +18,8 @@ struct WriteRequest<'a> {
 #[derive(Debug, Serialize)]
 struct ReadRequest<'a> {
     agent_id: Uuid,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    project: Option<&'a str>,
     filename: &'a str,
 }
 
@@ -164,10 +152,18 @@ impl MemoryHubClient {
     pub async fn read(
         &self,
         agent_id: Uuid,
+        project: Option<&str>,
         filename: &str,
     ) -> Result<Option<String>, ClientError> {
         let resp = self
-            .post("/v1/memories/read", &ReadRequest { agent_id, filename })
+            .post(
+                "/v1/memories/read",
+                &ReadRequest {
+                    agent_id,
+                    project,
+                    filename,
+                },
+            )
             .await?;
         if resp.status().as_u16() == 404 {
             return Ok(None);
@@ -229,9 +225,12 @@ mod tests {
 
     #[tokio::test]
     async fn read_some_and_none() {
+        use wiremock::matchers::body_partial_json;
+
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/v1/memories/read"))
+            .and(body_partial_json(serde_json::json!({ "project": "notes" })))
             .respond_with(
                 ResponseTemplate::new(200).set_body_json(serde_json::json!({"content": "body"})),
             )
@@ -239,7 +238,7 @@ mod tests {
             .await;
         let client = MemoryHubClient::new(server.uri(), "mh_tok".into());
         assert_eq!(
-            client.read(agent(), "x.md").await.unwrap(),
+            client.read(agent(), Some("notes"), "x.md").await.unwrap(),
             Some("body".to_string())
         );
 
@@ -250,7 +249,10 @@ mod tests {
             .mount(&server404)
             .await;
         let client404 = MemoryHubClient::new(server404.uri(), "mh_tok".into());
-        assert_eq!(client404.read(agent(), "missing.md").await.unwrap(), None);
+        assert_eq!(
+            client404.read(agent(), None, "missing.md").await.unwrap(),
+            None
+        );
     }
 
     #[tokio::test]

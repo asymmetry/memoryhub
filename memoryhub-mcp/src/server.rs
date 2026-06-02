@@ -1,4 +1,4 @@
-//! The MCP server: three tools forwarding to MemoryHub, plus agent identity wiring.
+//! The MCP server: four tools forwarding to MemoryHub, plus agent identity wiring.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -16,8 +16,9 @@ use serde::Deserialize;
 use tokio::sync::OnceCell;
 use uuid::Uuid;
 
-use crate::client::{ClientError, MemoryHubClient, SearchResult};
+use crate::client::{MemoryHubClient, SearchResult};
 use crate::config::Config;
+use crate::error::{ClientError, UploadError};
 use crate::identity;
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -33,18 +34,33 @@ pub struct SearchArgs {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct SaveArgs {
-    /// Absolute path to a memory file the agent has written. The absolute path is used as the
-    /// stored filename; the model does not name the memory.
-    pub path: String,
+pub struct WriteArgs {
     /// Optional project bucket to group this memory under (defaults to `_default`).
     #[serde(default)]
     pub project: Option<String>,
+    /// The name to store this memory under (e.g. `decisions.md`). Re-using a name updates it.
+    pub filename: String,
+    /// The memory content to store.
+    pub content: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct UploadArgs {
+    /// Optional project bucket to group this memory under (defaults to `_default`).
+    #[serde(default)]
+    pub project: Option<String>,
+    /// The name to store this memory under (e.g. `decisions.md`). Re-using a name updates it.
+    pub filename: String,
+    /// Absolute path to a file on disk; its contents are read and stored under `filename`.
+    pub path: String,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct ReadArgs {
-    /// The absolute path (filename) of a memory previously saved by this agent.
+    /// The project bucket the memory was saved under (defaults to `_default` when omitted).
+    #[serde(default)]
+    pub project: Option<String>,
+    /// The filename (name) of a memory previously saved by this agent.
     pub filename: String,
 }
 
@@ -60,19 +76,6 @@ pub fn format_search(results: &[SearchResult]) -> String {
         .join("\n\n")
 }
 
-/// Errors specific to `save_memory`'s filesystem handling.
-#[derive(Debug, thiserror::Error)]
-pub enum SaveError {
-    #[error("path must be absolute")]
-    NotAbsolute,
-
-    #[error("cannot read {0}")]
-    Io(String),
-
-    #[error(transparent)]
-    Client(#[from] ClientError),
-}
-
 pub async fn do_search(
     client: &MemoryHubClient,
     agent_id: Uuid,
@@ -85,28 +88,41 @@ pub async fn do_search(
     ))
 }
 
-pub async fn do_save(
+pub async fn do_write(
     client: &MemoryHubClient,
     agent_id: Uuid,
-    path: &str,
     project: Option<&str>,
-) -> Result<String, SaveError> {
+    filename: &str,
+    content: &str,
+) -> Result<String, ClientError> {
+    client.write(agent_id, project, filename, content).await?;
+    Ok(format!("Saved memory '{}'.", filename))
+}
+
+pub async fn do_upload(
+    client: &MemoryHubClient,
+    agent_id: Uuid,
+    project: Option<&str>,
+    filename: &str,
+    path: &str,
+) -> Result<String, UploadError> {
     if !Path::new(path).is_absolute() {
-        return Err(SaveError::NotAbsolute);
+        return Err(UploadError::NotAbsolute);
     }
     let content =
-        fs::read_to_string(path).map_err(|e| SaveError::Io(format!("{}: {}", path, e)))?;
-    client.write(agent_id, project, path, &content).await?;
+        fs::read_to_string(path).map_err(|e| UploadError::Io(format!("{}: {}", path, e)))?;
+    client.write(agent_id, project, filename, &content).await?;
 
-    Ok(format!("Saved memory '{}'.", path))
+    Ok(format!("Saved memory '{}'.", filename))
 }
 
 pub async fn do_read(
     client: &MemoryHubClient,
     agent_id: Uuid,
+    project: Option<&str>,
     filename: &str,
 ) -> Result<String, ClientError> {
-    match client.read(agent_id, filename).await? {
+    match client.read(agent_id, project, filename).await? {
         Some(content) => Ok(content),
         None => Ok(format!("No memory named '{}'.", filename)),
     }
@@ -178,17 +194,50 @@ impl McpServer {
     }
 
     #[tool(
-        description = "Persist a memory file you have written to disk. Pass its absolute path; \
-                       the file is read and stored under that absolute path as its name. \
-                       Re-saving the same path updates it."
+        description = "Save a memory you compose yourself. Provide the content directly, the \
+                       filename to store it under, and an optional project bucket. Re-using a \
+                       filename updates that memory."
     )]
-    async fn save_memory(
+    async fn write_memory(
         &self,
-        Parameters(args): Parameters<SaveArgs>,
+        Parameters(args): Parameters<WriteArgs>,
         ctx: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, McpError> {
         let agent_id = self.agent_id(&ctx).await;
-        match do_save(&self.client, agent_id, &args.path, args.project.as_deref()).await {
+        match do_write(
+            &self.client,
+            agent_id,
+            args.project.as_deref(),
+            &args.filename,
+            &args.content,
+        )
+        .await
+        {
+            Ok(text) => Ok(CallToolResult::success(vec![Content::text(text)])),
+            Err(e) => Err(McpError::internal_error(e.to_string(), None)),
+        }
+    }
+
+    #[tool(
+        description = "Save a memory file that already exists on disk. Pass its absolute path; \
+                       the file is read and stored under the given filename and optional project \
+                       bucket. Re-using a filename updates that memory."
+    )]
+    async fn upload_memory(
+        &self,
+        Parameters(args): Parameters<UploadArgs>,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        let agent_id = self.agent_id(&ctx).await;
+        match do_upload(
+            &self.client,
+            agent_id,
+            args.project.as_deref(),
+            &args.filename,
+            &args.path,
+        )
+        .await
+        {
             Ok(text) => Ok(CallToolResult::success(vec![Content::text(text)])),
             Err(e) => Err(McpError::internal_error(e.to_string(), None)),
         }
@@ -196,7 +245,7 @@ impl McpServer {
 
     #[tool(
         description = "Read the full content of a memory file you previously saved, by its \
-                       absolute path."
+                       filename and the project it was saved under."
     )]
     async fn read_memory(
         &self,
@@ -204,7 +253,14 @@ impl McpServer {
         ctx: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, McpError> {
         let agent_id = self.agent_id(&ctx).await;
-        match do_read(&self.client, agent_id, &args.filename).await {
+        match do_read(
+            &self.client,
+            agent_id,
+            args.project.as_deref(),
+            &args.filename,
+        )
+        .await
+        {
             Ok(text) => Ok(CallToolResult::success(vec![Content::text(text)])),
             Err(e) => Err(McpError::internal_error(e.to_string(), None)),
         }
@@ -217,8 +273,9 @@ impl ServerHandler for McpServer {
         let mut info = ServerInfo::default();
         info.instructions = Some(
             "MemoryHub gives you persistent memory across sessions. Call search_memory at the \
-             start of a task to recall relevant context, and save_memory to record durable \
-             decisions, preferences, and facts as you learn them."
+             start of a task to recall relevant context. Use write_memory to record durable \
+             decisions, preferences, and facts you compose as you learn them, or upload_memory \
+             to store a memory file that already exists on disk."
                 .to_string(),
         );
         info.capabilities = ServerCapabilities::builder().enable_tools().build();
@@ -230,10 +287,36 @@ impl ServerHandler for McpServer {
 mod tests {
     use wiremock::{
         Mock, MockServer, ResponseTemplate,
-        matchers::{method, path},
+        matchers::{body_partial_json, method, path},
     };
 
     use super::*;
+
+    #[tokio::test]
+    async fn do_write_sends_model_authored_content() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/memories/write"))
+            .and(body_partial_json(serde_json::json!({
+                "project": "notes",
+                "filename": "decisions.md",
+                "content": "we chose acktor",
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_string("{}"))
+            .mount(&server)
+            .await;
+        let client = MemoryHubClient::new(server.uri(), "mh_tok".into());
+        let msg = do_write(
+            &client,
+            Uuid::new_v4(),
+            Some("notes"),
+            "decisions.md",
+            "we chose acktor",
+        )
+        .await
+        .unwrap();
+        assert_eq!(msg, "Saved memory 'decisions.md'.");
+    }
 
     #[test]
     fn format_search_empty_and_nonempty() {
@@ -273,30 +356,37 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn do_save_reads_file_and_uses_absolute_path_as_filename() {
+    async fn do_upload_reads_file_and_stores_under_given_filename() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/v1/memories/write"))
+            .and(body_partial_json(serde_json::json!({
+                "project": "notes",
+                "filename": "ccc.md",
+                "content": "remember this",
+            })))
             .respond_with(ResponseTemplate::new(200).set_body_string("{}"))
             .mount(&server)
             .await;
         let dir = tempfile::tempdir().unwrap();
-        let file = dir.path().join("ccc.md");
+        let file = dir.path().join("local.md");
         std::fs::write(&file, "remember this").unwrap();
         let abs = file.to_str().unwrap();
 
         let client = MemoryHubClient::new(server.uri(), "mh_tok".into());
-        let msg = do_save(&client, Uuid::new_v4(), abs, None).await.unwrap();
-        assert_eq!(msg, format!("Saved memory '{}'.", abs));
+        let msg = do_upload(&client, Uuid::new_v4(), Some("notes"), "ccc.md", abs)
+            .await
+            .unwrap();
+        assert_eq!(msg, "Saved memory 'ccc.md'.");
     }
 
     #[tokio::test]
-    async fn do_save_rejects_relative_path() {
+    async fn do_upload_rejects_relative_path() {
         let client = MemoryHubClient::new("http://127.0.0.1:1".into(), "t".into());
-        let err = do_save(&client, Uuid::new_v4(), "relative/x.md", None)
+        let err = do_upload(&client, Uuid::new_v4(), None, "x.md", "relative/x.md")
             .await
             .unwrap_err();
-        assert!(matches!(err, SaveError::NotAbsolute));
+        assert!(matches!(err, UploadError::NotAbsolute));
     }
 
     #[tokio::test]
@@ -308,7 +398,7 @@ mod tests {
             .mount(&server)
             .await;
         let client = MemoryHubClient::new(server.uri(), "mh_tok".into());
-        let msg = do_read(&client, Uuid::new_v4(), "missing.md")
+        let msg = do_read(&client, Uuid::new_v4(), Some("notes"), "missing.md")
             .await
             .unwrap();
         assert_eq!(msg, "No memory named 'missing.md'.");

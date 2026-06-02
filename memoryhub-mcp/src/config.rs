@@ -2,25 +2,14 @@
 
 use uuid::Uuid;
 
+use crate::error::ConfigError;
+
 /// Validated runtime configuration.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Config {
     pub url: String,
     pub token: String,
     pub agent_id: Option<Uuid>,
-}
-
-/// Configuration errors surfaced at startup.
-#[derive(Debug, thiserror::Error, PartialEq, Eq)]
-pub enum ConfigError {
-    #[error("MEMORYHUB_URL is required")]
-    MissingUrl,
-
-    #[error("MEMORYHUB_TOKEN is required")]
-    MissingToken,
-
-    #[error("MEMORYHUB_AGENT_ID is not a valid UUID: {0}")]
-    BadAgentId(String),
 }
 
 impl Config {

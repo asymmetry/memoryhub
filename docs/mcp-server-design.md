@@ -33,14 +33,18 @@ Keying on the client name (not one fixed file) is what puts each agent in its ow
 
 Each tool forwards to the API with the resolved `agent_id` and a `Authorization: Bearer <token>` header.
 
-| Tool            | Input                        | Request                    | Result                                           |
-| --------------- | ---------------------------- | -------------------------- | ------------------------------------------------ |
-| `search_memory` | `{query, scope?, raw_only?}` | `POST /v1/memories/search` | hits as `path (score): snippet`, or "no matches" |
-| `save_memory`   | `{path, project?}`           | `POST /v1/memories/write`  | confirmation                                     |
-| `read_memory`   | `{filename}`                 | `POST /v1/memories/read`   | content, or "not found"                          |
+| Tool            | Input                          | Request                    | Result                                           |
+| --------------- | ------------------------------ | -------------------------- | ------------------------------------------------ |
+| `search_memory` | `{query, scope?, raw_only?}`   | `POST /v1/memories/search` | hits as `path (score): snippet`, or "no matches" |
+| `write_memory`  | `{project?, filename, content}`| `POST /v1/memories/write`  | confirmation                                     |
+| `upload_memory` | `{project?, filename, path}`   | `POST /v1/memories/write`  | confirmation                                     |
+| `read_memory`   | `{project?, filename}`         | `POST /v1/memories/read`   | content, or "not found"                          |
 
-- **`save_memory`** does not let the model name the memory. It takes the absolute `path` of a file the agent has written, reads that file from disk, and uploads it using the absolute path as the `filename`. A relative path, or a missing/unreadable file, is an error. Writes are replace-by-path, so re-saving the same path updates it.
-- **`read_memory`** takes the absolute `filename` (the path used at save time) and returns the stored content from the server.
+There are two ways to persist a memory; both store under `{username}/{agent_id}/{project}/{filename}` and are replace-by-(project, filename), so re-using a filename updates that memory.
+
+- **`write_memory`** is the model-authored path: the model composes the `content` and names the memory via `filename`, with an optional `project` bucket (defaults to `_default`). Use this for durable decisions, preferences, and facts the model records as it works.
+- **`upload_memory`** stores a file that already exists on disk: it takes an absolute `path`, reads the file, and stores it under the given `filename` and optional `project`. A relative path, or a missing/unreadable file, is an error. The two tools differ only in the content source — inline vs. read-from-disk.
+- **`read_memory`** takes the `filename` and the `project` it was saved under (defaults to `_default` when omitted) and returns the stored content.
 - **`search_memory`** defaults to the server's `all` scope, so it spans the whole team's memories and summaries; the optional `scope` (`all`/`user`/`agent`) and `raw_only` narrow it. Results show their full path, so the owning user/agent is visible.
 - Tool descriptions and the MCP `initialize` instructions are written to drive proactive use (search before a task; save durable notes/decisions/facts).
 

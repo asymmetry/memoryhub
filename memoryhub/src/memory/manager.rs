@@ -16,7 +16,10 @@ use super::config::MemoryConfig;
 use super::error::MemoryError;
 use super::file_op::FileOp;
 use super::indexer::Indexer;
-use super::message::{FileOpDelete, FileOpRead, FileOpWrite, Search};
+use super::message::{
+    FileOpDelete, FileOpRead, FileOpWrite, GetSummary, Search, StorageRead, Summary,
+};
+use super::path;
 use super::search_op::SearchOp;
 use super::storage::Storage;
 use super::synthesizer::Synthesizer;
@@ -231,6 +234,35 @@ impl Handler<Search> for MemoryManager {
     }
 }
 
+impl Handler<GetSummary> for MemoryManager {
+    type Result = FutureMessageResult<GetSummary>;
+
+    async fn handle(
+        &mut self,
+        msg: GetSummary,
+        _ctx: &mut Self::Context,
+    ) -> FutureMessageResult<GetSummary> {
+        debug_trace!("Handle command {:?}", msg);
+
+        let memory_dir = PathBuf::from(&self.config.memory_dir);
+        let storage = self.storage().clone();
+
+        FutureMessageResult::new(async move {
+            let Some(target) = msg.scope.target(msg.username, msg.agent_id) else {
+                return Ok(None);
+            };
+            let Some(rel) = path::get_latest_synthesis_file(&memory_dir, &target).await else {
+                return Ok(None);
+            };
+            let content = storage
+                .send(StorageRead { path: rel.clone() })
+                .await?
+                .await??;
+            Ok(content.map(|content| Summary { content, path: rel }))
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use uuid::Uuid;
@@ -361,6 +393,76 @@ mod tests {
             .unwrap();
 
         assert!(!results.is_empty());
+    }
+
+    #[tokio::test]
+    async fn get_summary_returns_latest_after_synthesis() {
+        use crate::memory::message::{GetSummary, SummaryScope};
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg = test_config(dir.path());
+        cfg.synthesizer_cooldown_secs = 0;
+        let mm = MemoryManager::new(cfg, test_llm(dir.path()));
+        let (addr, _handle) = mm.start("memory-manager").unwrap();
+
+        let agent_id = Uuid::new_v4();
+        addr.send(FileOpWrite {
+            username: "alice".into(),
+            agent_id,
+            project: None,
+            filename: "first.md".into(),
+            content: "Some content for synthesis".into(),
+        })
+        .await
+        .unwrap()
+        .await
+        .unwrap()
+        .unwrap();
+
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+        let summary = addr
+            .send(GetSummary {
+                username: "alice".into(),
+                agent_id: Some(agent_id),
+                scope: SummaryScope::User,
+            })
+            .await
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap();
+
+        let summary = summary.expect("expected a synthesized summary");
+        assert!(
+            summary.path.contains("alice/_synthesized/"),
+            "path was {}",
+            summary.path
+        );
+        assert!(!summary.content.is_empty());
+    }
+
+    #[tokio::test]
+    async fn get_summary_is_none_when_absent() {
+        use crate::memory::message::{GetSummary, SummaryScope};
+
+        let dir = tempfile::tempdir().unwrap();
+        let mm = MemoryManager::new(test_config(dir.path()), test_llm(dir.path()));
+        let (addr, _handle) = mm.start("memory-manager").unwrap();
+
+        let summary = addr
+            .send(GetSummary {
+                username: "bob".into(),
+                agent_id: None,
+                scope: SummaryScope::User,
+            })
+            .await
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert!(summary.is_none());
     }
 
     #[tokio::test]

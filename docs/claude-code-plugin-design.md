@@ -62,8 +62,9 @@ model's tool-writes and the hooks' uploads share one folder (assumes Claude Code
 
 ## Setup
 
-`/mh-config` writes `url` + `token` to `<config_dir>/memoryhub/config.json` and ensures the
-`agent_id` file. It no longer installs hooks (the manifest declares them).
+`/mh-config` writes `url` + `token` to `<config_dir>/memoryhub/config.json`. The `agent_id` file
+is created lazily on the first `upload`/`recall`. It no longer installs hooks (the manifest
+declares them).
 
 ## Dropped
 

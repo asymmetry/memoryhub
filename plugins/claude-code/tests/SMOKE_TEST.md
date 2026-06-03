@@ -16,7 +16,7 @@ Manual checklist to verify the plugin works end-to-end in a real Claude Code ses
 
 - [ ] Confirm the hooks are declared in the plugin manifest:
   ```
-  cat ~/.claude/plugins/memoryhub/manifest.json | python3 -m json.tool | grep -A5 hooks
+  cat ~/.claude/plugins/memoryhub/plugin.json | python3 -m json.tool | grep -A5 hooks
   ```
 
 - [ ] Ask Claude to write or edit a file under `~/.claude/projects/*/memory/*.md` (e.g. "save a memory: I prefer tabs over spaces"). Wait for the Write tool to fire. The **capture** hook runs automatically after the batch and uploads the file via `memoryhub-mcp upload --agent claude-code`.

@@ -53,6 +53,18 @@ struct SearchResponse {
     results: Vec<SearchResult>,
 }
 
+#[derive(Debug, Serialize)]
+struct SummaryRequest<'a> {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    agent_id: Option<Uuid>,
+    scope: &'a str,
+}
+
+#[derive(Debug, Deserialize)]
+struct SummaryResponse {
+    content: String,
+}
+
 /// Client holding the base URL, bearer token, and a shared `reqwest::Client`.
 #[derive(Clone)]
 pub struct MemoryHubClient {
@@ -175,6 +187,26 @@ impl MemoryHubClient {
             .map_err(|e| ClientError::Decode(e.to_string()))?;
         Ok(Some(parsed.content))
     }
+
+    /// Proxies a `summary` to the MemoryHub API; 404 → `None`.
+    pub async fn summary(
+        &self,
+        agent_id: Option<Uuid>,
+        scope: &str,
+    ) -> Result<Option<String>, ClientError> {
+        let resp = self
+            .post("/v1/memories/summary", &SummaryRequest { agent_id, scope })
+            .await?;
+        if resp.status().as_u16() == 404 {
+            return Ok(None);
+        }
+        let resp = Self::ensure_ok(resp).await?;
+        let parsed: SummaryResponse = resp
+            .json()
+            .await
+            .map_err(|e| ClientError::Decode(e.to_string()))?;
+        Ok(Some(parsed.content))
+    }
 }
 
 #[cfg(test)]
@@ -274,5 +306,51 @@ mod tests {
         let client = MemoryHubClient::new("http://127.0.0.1:1".into(), "t".into());
         let err = client.search(agent(), None, false, "q").await.unwrap_err();
         assert!(matches!(err, ClientError::Unreachable(_)));
+    }
+
+    #[test]
+    fn summary_request_omits_absent_agent_id() {
+        let body = serde_json::to_string(&SummaryRequest {
+            agent_id: None,
+            scope: "global",
+        })
+        .unwrap();
+        assert!(
+            !body.contains("agent_id"),
+            "agent_id should be omitted, got: {body}"
+        );
+        assert!(body.contains("\"scope\":\"global\""), "got: {body}");
+    }
+
+    #[tokio::test]
+    async fn summary_some_and_none() {
+        use wiremock::matchers::body_partial_json;
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/memories/summary"))
+            .and(body_partial_json(serde_json::json!({ "scope": "user" })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(
+                serde_json::json!({"content": "digest", "path": "alice/_synthesized/2026-06-03-01.md"}),
+            ))
+            .mount(&server)
+            .await;
+        let client = MemoryHubClient::new(server.uri(), "mh_tok".into());
+        assert_eq!(
+            client.summary(Some(agent()), "user").await.unwrap(),
+            Some("digest".to_string())
+        );
+
+        let server404 = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/memories/summary"))
+            .respond_with(ResponseTemplate::new(404).set_body_string(r#"{"error":"not_found"}"#))
+            .mount(&server404)
+            .await;
+        let client404 = MemoryHubClient::new(server404.uri(), "mh_tok".into());
+        assert_eq!(
+            client404.summary(Some(agent()), "user").await.unwrap(),
+            None
+        );
     }
 }

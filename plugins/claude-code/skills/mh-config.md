@@ -1,9 +1,11 @@
 # mh-config
 
-Configure the MemoryHub plugin (server URL, username). Run:
+Configure MemoryHub for Claude Code. Run:
 
 ```bash
-python3 ~/.claude/plugins/memoryhub/memoryhub.py config
+memoryhub-mcp config
 ```
 
-This command is interactive — run it in the terminal and let the user respond to the prompts. It saves `~/.claude/memoryhub.json` and installs the auto-push hook into `~/.claude/settings.json`.
+This prompts for the server URL and API token and writes them to
+`<config_dir>/memoryhub/config.json`, which the capture/recall hooks read. The
+hooks are declared by the plugin manifest — no `settings.json` editing needed.

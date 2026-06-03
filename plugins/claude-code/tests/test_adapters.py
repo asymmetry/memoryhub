@@ -31,3 +31,17 @@ def test_collect_items_dedups_and_filters():
     ]}
     items = capture.collect_items(payload)
     assert items == [{"project": "h", "filename": "memory/a.md", "path": mem}]
+
+
+import recall  # noqa: E402
+
+
+def test_format_context_wraps_additional_context():
+    out = recall.format_context("my digest")
+    assert out["hookSpecificOutput"]["hookEventName"] == "SessionStart"
+    assert out["hookSpecificOutput"]["additionalContext"] == "my digest"
+
+
+def test_format_context_empty_is_none():
+    assert recall.format_context("") is None
+    assert recall.format_context("   ") is None

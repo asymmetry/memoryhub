@@ -1,5 +1,6 @@
 //! Runtime configuration loaded from environment variables.
 
+use std::path::Path;
 use uuid::Uuid;
 
 use crate::error::ConfigError;
@@ -10,6 +11,12 @@ pub struct Config {
     pub url: String,
     pub token: String,
     pub agent_id: Option<Uuid>,
+}
+
+#[derive(Debug, serde::Deserialize, Default)]
+struct FileConfig {
+    url: Option<String>,
+    token: Option<String>,
 }
 
 impl Config {
@@ -44,6 +51,31 @@ impl Config {
             std::env::var("MEMORYHUB_TOKEN").ok(),
             std::env::var("MEMORYHUB_AGENT_ID").ok(),
         )
+    }
+
+    /// Resolve `(url, token)` for hook-CLI mode: env first, then
+    /// `<config_dir>/config.json`. `config_dir` is the `…/memoryhub` dir.
+    pub fn load_connection(
+        config_dir: &Path,
+        env_url: Option<String>,
+        env_token: Option<String>,
+    ) -> Result<(String, String), ConfigError> {
+        let file: FileConfig = std::fs::read_to_string(config_dir.join("config.json"))
+            .ok()
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default();
+
+        let url = env_url
+            .filter(|s| !s.is_empty())
+            .or(file.url)
+            .filter(|s| !s.is_empty())
+            .ok_or(ConfigError::MissingUrl)?;
+        let token = env_token
+            .filter(|s| !s.is_empty())
+            .or(file.token)
+            .filter(|s| !s.is_empty())
+            .ok_or(ConfigError::MissingToken)?;
+        Ok((url.trim_end_matches('/').to_string(), token))
     }
 }
 
@@ -92,5 +124,36 @@ mod tests {
     fn load_no_override_is_none() {
         let cfg = Config::load(Some("u".into()), Some("t".into()), None).unwrap();
         assert!(cfg.agent_id.is_none());
+    }
+
+    #[test]
+    fn load_connection_prefers_env_then_file() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("config.json"),
+            r#"{"url":"http://file:8000/","token":"file_tok"}"#,
+        )
+        .unwrap();
+
+        // File fallback when env absent.
+        let (url, token) = Config::load_connection(dir.path(), None, None).unwrap();
+        assert_eq!(url, "http://file:8000");
+        assert_eq!(token, "file_tok");
+
+        // Env wins.
+        let (url, token) = Config::load_connection(
+            dir.path(),
+            Some("http://env:9/".into()),
+            Some("env_tok".into()),
+        )
+        .unwrap();
+        assert_eq!(url, "http://env:9");
+        assert_eq!(token, "env_tok");
+    }
+
+    #[test]
+    fn load_connection_errors_when_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(Config::load_connection(dir.path(), None, None).is_err());
     }
 }

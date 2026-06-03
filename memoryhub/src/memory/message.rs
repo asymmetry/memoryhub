@@ -4,7 +4,7 @@ use acktor::Message;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::llm::Embedding;
+use crate::llm::{Embedding, SynthesisTarget};
 use crate::memory::error::{IndexError, MemoryError, StorageError};
 
 // ---------------------------------------------------------------------------
@@ -22,6 +22,36 @@ pub enum SearchScope {
     User,
     /// The caller's user+agent: `{username}/{agent_id}/%`.
     Agent,
+}
+
+/// Which synthesized summary tier to fetch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SummaryScope {
+    User,
+    Agent,
+    Global,
+}
+
+impl SummaryScope {
+    /// Resolve to a `SynthesisTarget`; `Agent` needs an `agent_id` (else `None`).
+    pub fn target(self, username: String, agent_id: Option<Uuid>) -> Option<SynthesisTarget> {
+        match self {
+            SummaryScope::User => Some(SynthesisTarget::User { username }),
+            SummaryScope::Global => Some(SynthesisTarget::Global),
+            SummaryScope::Agent => agent_id.map(|id| SynthesisTarget::Agent {
+                username,
+                agent_id: id.to_string(),
+            }),
+        }
+    }
+}
+
+/// A synthesized summary returned by `GetSummary`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Summary {
+    pub content: String,
+    pub path: String,
 }
 
 /// A chunk of text extracted from a memory file, with its embedding vector.
@@ -161,6 +191,15 @@ pub struct Search {
     pub query: String,
 }
 
+/// Fetch the latest synthesized summary for a tier.
+#[derive(Debug, Clone, Message)]
+#[result_type(Result<Option<Summary>, MemoryError>)]
+pub struct GetSummary {
+    pub username: String,
+    pub agent_id: Option<Uuid>,
+    pub scope: SummaryScope,
+}
+
 // ---------------------------------------------------------------------------
 // Synthesizer messages
 // ---------------------------------------------------------------------------
@@ -236,5 +275,40 @@ mod tests {
         };
         assert_eq!(chunk.start_line, 1);
         assert_eq!(chunk.embedding.0.len(), 128);
+    }
+
+    #[test]
+    fn summary_scope_serde_is_lowercase() {
+        assert_eq!(
+            serde_json::to_string(&SummaryScope::Global).unwrap(),
+            "\"global\""
+        );
+        let s: SummaryScope = serde_json::from_str("\"agent\"").unwrap();
+        assert_eq!(s, SummaryScope::Agent);
+    }
+
+    #[test]
+    fn summary_scope_target_maps_tiers() {
+        use crate::llm::SynthesisTarget;
+        let uid = Uuid::nil();
+        assert_eq!(
+            SummaryScope::User.target("alice".into(), None),
+            Some(SynthesisTarget::User {
+                username: "alice".into()
+            })
+        );
+        assert_eq!(
+            SummaryScope::Global.target("alice".into(), None),
+            Some(SynthesisTarget::Global)
+        );
+        assert_eq!(
+            SummaryScope::Agent.target("alice".into(), Some(uid)),
+            Some(SynthesisTarget::Agent {
+                username: "alice".into(),
+                agent_id: uid.to_string()
+            })
+        );
+        // Agent scope without an agent_id yields nothing.
+        assert_eq!(SummaryScope::Agent.target("alice".into(), None), None);
     }
 }

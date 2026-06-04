@@ -4,7 +4,7 @@
 
 `memoryhub-mcp` is a small standalone binary that exposes a user's MemoryHub memories to any MCP-capable coding agent (Claude Code, Cursor, Codex, Zed, …). It speaks the [Model Context Protocol](https://modelcontextprotocol.io) over **stdio** and is a thin **client** of the existing MemoryHub HTTP API — each tool call becomes one `/v1` request carrying the user's bearer token. One server covers every MCP-speaking agent, so adding an agent is a config snippet, not new code.
 
-With no subcommand it runs the stdio MCP server above; the `upload` and `recall` subcommands (see [Hook-support CLI](#hook-support-cli)) make it the shared engine for the deterministic hook layer that per-agent plugins drive. The binary never parses a raw agent hook payload — each plugin normalizes first (see [claude-code-plugin-design.md](claude-code-plugin-design.md)).
+With no subcommand it runs the stdio MCP server above; the `upload` and `recall` subcommands (see [Hook-support CLI](#hook-support-cli)) make it the shared engine for the deterministic hook layer that per-agent plugins drive. The binary never parses a raw agent hook payload — each plugin normalizes first (see [plugins-design.md](plugins-design.md)).
 
 ## Crate layout
 

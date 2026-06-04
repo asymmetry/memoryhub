@@ -2,7 +2,7 @@
 //!
 //! Each connecting client agent is identified by a UUID. Usually this is provided by the
 //! `MEMORYHUB_AGENT_ID` environment variable. If the env variable is not set, a UUID is generated
-//! and persisted on disk (identifyed by the client name) for future reuse.
+//! and persisted on disk (identified by the client name) for future reuse.
 
 use std::fs;
 use std::io;

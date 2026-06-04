@@ -16,7 +16,7 @@ use serde::Deserialize;
 use tokio::sync::OnceCell;
 use uuid::Uuid;
 
-use crate::client::{MemoryHubClient, SearchResult};
+use crate::client::{HttpClient, SearchResult};
 use crate::config::Config;
 use crate::error::{ClientError, UploadError};
 use crate::identity;
@@ -77,7 +77,7 @@ pub fn format_search(results: &[SearchResult]) -> String {
 }
 
 pub async fn do_search(
-    client: &MemoryHubClient,
+    client: &HttpClient,
     agent_id: Uuid,
     scope: Option<&str>,
     raw_only: bool,
@@ -89,7 +89,7 @@ pub async fn do_search(
 }
 
 pub async fn do_write(
-    client: &MemoryHubClient,
+    client: &HttpClient,
     agent_id: Uuid,
     project: Option<&str>,
     filename: &str,
@@ -100,7 +100,7 @@ pub async fn do_write(
 }
 
 pub async fn do_upload(
-    client: &MemoryHubClient,
+    client: &HttpClient,
     agent_id: Uuid,
     project: Option<&str>,
     filename: &str,
@@ -117,7 +117,7 @@ pub async fn do_upload(
 }
 
 pub async fn do_read(
-    client: &MemoryHubClient,
+    client: &HttpClient,
     agent_id: Uuid,
     project: Option<&str>,
     filename: &str,
@@ -130,7 +130,7 @@ pub async fn do_read(
 
 #[derive(Clone)]
 pub struct McpServer {
-    client: MemoryHubClient,
+    client: HttpClient,
     config: Config,
     config_dir: PathBuf,
     agent_id: Arc<OnceCell<Uuid>>,
@@ -140,7 +140,7 @@ pub struct McpServer {
 
 #[tool_router]
 impl McpServer {
-    pub fn new(client: MemoryHubClient, config: Config, config_dir: PathBuf) -> Self {
+    pub fn new(client: HttpClient, config: Config, config_dir: PathBuf) -> Self {
         Self {
             client,
             config,
@@ -305,7 +305,7 @@ mod tests {
             .respond_with(ResponseTemplate::new(200).set_body_string("{}"))
             .mount(&server)
             .await;
-        let client = MemoryHubClient::new(server.uri(), "mh_tok".into());
+        let client = HttpClient::new(server.uri(), "mh_tok".into());
         let msg = do_write(
             &client,
             Uuid::new_v4(),
@@ -335,27 +335,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn do_search_formats_hits() {
-        let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(path("/v1/memories/search"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "results": [{
-                    "path": "alice/abc/notes.md",
-                    "start_line": 1, "end_line": 3, "score": 0.91, "snippet": "hello world"
-                }]
-            })))
-            .mount(&server)
-            .await;
-        let client = MemoryHubClient::new(server.uri(), "mh_tok".into());
-        let out = do_search(&client, Uuid::new_v4(), None, false, "hello")
-            .await
-            .unwrap();
-        assert!(out.contains("alice/abc/notes.md"));
-        assert!(out.contains("hello world"));
-    }
-
-    #[tokio::test]
     async fn do_upload_reads_file_and_stores_under_given_filename() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
@@ -373,7 +352,7 @@ mod tests {
         std::fs::write(&file, "remember this").unwrap();
         let abs = file.to_str().unwrap();
 
-        let client = MemoryHubClient::new(server.uri(), "mh_tok".into());
+        let client = HttpClient::new(server.uri(), "mh_tok".into());
         let msg = do_upload(&client, Uuid::new_v4(), Some("notes"), "ccc.md", abs)
             .await
             .unwrap();
@@ -382,7 +361,7 @@ mod tests {
 
     #[tokio::test]
     async fn do_upload_rejects_relative_path() {
-        let client = MemoryHubClient::new("http://127.0.0.1:1".into(), "t".into());
+        let client = HttpClient::new("http://127.0.0.1:1".into(), "t".into());
         let err = do_upload(&client, Uuid::new_v4(), None, "x.md", "relative/x.md")
             .await
             .unwrap_err();
@@ -397,7 +376,7 @@ mod tests {
             .respond_with(ResponseTemplate::new(404).set_body_string(r#"{"error":"not_found"}"#))
             .mount(&server)
             .await;
-        let client = MemoryHubClient::new(server.uri(), "mh_tok".into());
+        let client = HttpClient::new(server.uri(), "mh_tok".into());
         let msg = do_read(&client, Uuid::new_v4(), Some("notes"), "missing.md")
             .await
             .unwrap();

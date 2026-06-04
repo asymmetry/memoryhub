@@ -1,12 +1,48 @@
-//! Hook-CLI subcommand cores. Pure-ish: I/O wiring lives in `main.rs`.
+//! Hook-CLI argument parsing and subcommand cores. Pure-ish: I/O wiring lives in `main.rs`.
 
-use std::io::Read;
+use std::io::{Read, Result};
 
+use clap::{Parser, Subcommand};
 use serde::Deserialize;
 use uuid::Uuid;
 
-use crate::client::MemoryHubClient;
-use crate::server::do_upload;
+use memoryhub_mcp::{client::HttpClient, server::do_upload};
+
+#[derive(Parser)]
+#[command(name = "memoryhub-mcp")]
+pub struct Cli {
+    #[command(subcommand)]
+    pub command: Option<Command>,
+}
+
+#[derive(Subcommand)]
+pub enum Command {
+    /// Write url/token to <config_dir>/memoryhub/config.toml (interactive),
+    /// or with --check, exit 0 if configured and non-zero otherwise (no prompts).
+    Config {
+        /// Exit 0 if url+token resolve (env or config.toml), non-zero otherwise. No prompts.
+        #[arg(long)]
+        check: bool,
+    },
+    /// Upload memory files (stdin JSON array, or a single --filename/--path).
+    Upload {
+        #[arg(long)]
+        agent: String,
+        #[arg(long)]
+        project: Option<String>,
+        #[arg(long)]
+        filename: Option<String>,
+        #[arg(long)]
+        path: Option<String>,
+    },
+    /// Print the latest synthesized summary for the agent's scope.
+    Recall {
+        #[arg(long)]
+        agent: String,
+        #[arg(long, default_value = "user")]
+        scope: String,
+    },
+}
 
 /// One file to upload, as sent by a plugin hook on stdin.
 #[derive(Debug, Deserialize)]
@@ -17,19 +53,25 @@ pub struct UploadItem {
     pub path: String,
 }
 
-/// Parse a JSON array of upload items from a reader.
+/// Parses a JSON array of upload items from a reader.
 ///
-/// I/O errors are propagated as `Err`. JSON parse errors are silently treated
-/// as an empty list — a hook must never crash the session because of bad stdin.
-pub fn parse_items<R: Read>(mut reader: R) -> std::io::Result<Vec<UploadItem>> {
+/// I/O errors are propagated as `Err`. JSON parse errors are silently treated as an empty list
+/// since a hook must never crash the session because of bad stdin.
+pub fn parse_items<R>(mut reader: R) -> Result<Vec<UploadItem>>
+where
+    R: Read,
+{
     let mut buf = String::new();
     reader.read_to_string(&mut buf)?;
+
     Ok(serde_json::from_str(&buf).unwrap_or_default())
 }
 
-/// Upload each item; returns a `(filename, error)` list of failures (never panics).
+/// Uploads each item.
+///
+/// Returns a `(filename, error)` list of failures (never panics).
 pub async fn upload_items(
-    client: &MemoryHubClient,
+    client: &HttpClient,
     agent_id: Uuid,
     items: Vec<UploadItem>,
 ) -> Vec<(String, String)> {
@@ -58,8 +100,9 @@ mod tests {
         matchers::{method, path},
     };
 
+    use memoryhub_mcp::client::HttpClient;
+
     use super::*;
-    use crate::client::MemoryHubClient;
 
     #[test]
     fn parse_upload_items_from_json() {
@@ -97,7 +140,7 @@ mod tests {
                 path: p.to_string_lossy().to_string(),
             });
         }
-        let client = MemoryHubClient::new(server.uri(), "t".into());
+        let client = HttpClient::new(server.uri(), "t".into());
         let failures = upload_items(&client, Uuid::new_v4(), items).await;
         assert!(failures.is_empty(), "failures: {failures:?}");
     }

@@ -1,44 +1,23 @@
 //! MemoryHub MCP server + hook-CLI: stdio MCP by default, `upload`/`recall`/`config` subcommands.
 
-use std::io::Write;
+use std::fs;
+use std::io::{self, Write};
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
-use clap::{Parser, Subcommand};
+use clap::Parser;
 use rmcp::{ServiceExt, transport::stdio};
+use uuid::Uuid;
 
-use memoryhub_mcp::{cli, client::MemoryHubClient, config::Config, identity, server::McpServer};
+use memoryhub_mcp::{
+    client::HttpClient,
+    config::{Config, FileConfig},
+    identity,
+    server::McpServer,
+};
 
-#[derive(Parser)]
-#[command(name = "memoryhub-mcp")]
-struct Cli {
-    #[command(subcommand)]
-    command: Option<Command>,
-}
-
-#[derive(Subcommand)]
-enum Command {
-    /// Upload memory files (stdin JSON array, or a single --filename/--path).
-    Upload {
-        #[arg(long)]
-        agent: String,
-        #[arg(long)]
-        project: Option<String>,
-        #[arg(long)]
-        filename: Option<String>,
-        #[arg(long)]
-        path: Option<String>,
-    },
-    /// Print the latest synthesized summary for the agent's scope.
-    Recall {
-        #[arg(long)]
-        agent: String,
-        #[arg(long, default_value = "user")]
-        scope: String,
-    },
-    /// Write url/token to <config_dir>/memoryhub/config.json (interactive).
-    Config,
-}
+mod cli;
+use cli::{Cli, Command};
 
 fn config_dir() -> PathBuf {
     dirs::config_dir()
@@ -46,93 +25,114 @@ fn config_dir() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from(".memoryhub"))
 }
 
-fn cli_client(agent: &str) -> Result<(MemoryHubClient, uuid::Uuid)> {
+fn create_http_client(agent: &str) -> Result<(HttpClient, Uuid)> {
     let dir = config_dir();
-    let (url, token) = Config::load_connection(
-        &dir,
-        std::env::var("MEMORYHUB_URL").ok(),
-        std::env::var("MEMORYHUB_TOKEN").ok(),
-    )?;
-    let agent_id_override = std::env::var("MEMORYHUB_AGENT_ID")
-        .ok()
-        .and_then(|s| s.parse().ok());
-    let agent_id = identity::resolve_agent_id(agent_id_override, Some(agent), &dir)?;
-    Ok((MemoryHubClient::new(url, token), agent_id))
+    let config = Config::from_file(&dir.join("config.toml"))?;
+    let agent_id = identity::resolve_agent_id(config.agent_id, Some(agent), &dir)?;
+
+    Ok((HttpClient::new(config.url, config.token), agent_id))
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
     match Cli::parse().command {
-        None => run_server().await,
+        None => launch_mcp_server().await,
+
+        Some(Command::Config { check }) => {
+            if check {
+                check_config()
+            } else {
+                run_config()
+            }
+        }
+
         Some(Command::Upload {
             agent,
             project,
             filename,
             path,
         }) => {
-            let (client, agent_id) = cli_client(&agent)?;
+            let (client, agent_id) = create_http_client(&agent)?;
             let items = match (filename, path) {
                 (Some(filename), Some(path)) => vec![cli::UploadItem {
                     project,
                     filename,
                     path,
                 }],
-                _ => cli::parse_items(std::io::stdin().lock())?,
+                _ => cli::parse_items(io::stdin().lock())?,
             };
             for (name, err) in cli::upload_items(&client, agent_id, items).await {
-                eprintln!("memoryhub-mcp: upload {name} failed: {err}");
+                eprintln!("memoryhub-mcp: upload {} failed: {}", name, err);
             }
+
             Ok(())
         }
+
         Some(Command::Recall { agent, scope }) => {
-            let (client, agent_id) = cli_client(&agent)?;
+            let (client, agent_id) = create_http_client(&agent)?;
             match client.summary(Some(agent_id), &scope).await {
                 Ok(Some(text)) => {
                     print!("{text}");
-                    std::io::stdout().flush().ok();
+                    io::stdout().flush().ok();
                 }
                 Ok(None) => {}
-                Err(e) => eprintln!("memoryhub-mcp: recall failed: {e}"),
+                Err(e) => eprintln!("memoryhub-mcp: recall failed: {}", e),
             }
             Ok(())
         }
-        Some(Command::Config) => run_config(),
     }
 }
 
-async fn run_server() -> Result<()> {
-    let config = match Config::from_env() {
+async fn launch_mcp_server() -> Result<()> {
+    let config = match Config::from_envs() {
         Ok(c) => c,
         Err(e) => {
             eprintln!("memoryhub-mcp: {e}");
             std::process::exit(1);
         }
     };
-    let client = MemoryHubClient::new(config.url.clone(), config.token.clone());
+
+    let client = HttpClient::new(config.url.clone(), config.token.clone());
     let server = McpServer::new(client, config, config_dir());
+
     let service = server.serve(stdio()).await?;
     service.waiting().await?;
+
+    Ok(())
+}
+
+/// Exit 0 if a usable connection config resolves, non-zero otherwise. Quiet (no prompts,
+/// no error text) — it's meant for a plugin hook to test whether setup has been done.
+fn check_config() -> Result<()> {
+    if Config::from_file(&config_dir().join("config.toml")).is_err() {
+        std::process::exit(1);
+    }
     Ok(())
 }
 
 fn run_config() -> Result<()> {
     let dir = config_dir();
-    std::fs::create_dir_all(&dir).ok();
+    fs::create_dir_all(&dir).ok();
+
     let prompt = |label: &str| -> Result<String> {
         print!("{label}: ");
-        std::io::stdout().flush().ok();
+        io::stdout().flush().ok();
         let mut s = String::new();
-        std::io::stdin().read_line(&mut s)?;
+        io::stdin().read_line(&mut s)?;
         Ok(s.trim().to_string())
     };
+
     let url = prompt("MemoryHub URL")?;
     let token = prompt("MemoryHub token (mh_...)")?;
-    let body = serde_json::json!({ "url": url, "token": token });
-    std::fs::write(
-        dir.join("config.json"),
-        serde_json::to_string_pretty(&body)?,
-    )
-    .context("writing config.json")?;
-    println!("Saved {}", dir.join("config.json").display());
+
+    let body = toml::to_string(&FileConfig {
+        url: Some(url),
+        token: Some(token),
+    })?;
+    let path = dir.join("config.toml");
+    fs::write(&path, body).with_context(|| format!("writing {}", path.display()))?;
+
+    println!("Saved {}", path.display());
+
     Ok(())
 }

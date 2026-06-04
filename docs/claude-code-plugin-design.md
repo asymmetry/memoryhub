@@ -6,7 +6,7 @@ model-driven MCP tools. The model uses the `memoryhub-mcp` tools (`search_memory
 regardless, so some memory behavior is guaranteed:
 
 |           | Model-driven (MCP tools)         | Deterministic (this plugin)                                      |
-| --------- | -------------------------------- | --------------------------------------------------------------- |
+| --------- | -------------------------------- | ---------------------------------------------------------------- |
 | **Write** | `write_memory` / `upload_memory` | **capture** hook — auto-upload memory files the model writes     |
 | **Read**  | `search_memory` / `read_memory`  | **recall** hook — auto-inject a memory baseline at session start |
 
@@ -24,11 +24,12 @@ The plugin owns only what is Claude-Code-specific:
 
 ```
 plugins/claude-code/
-  plugin.json        # hook declarations + setup skill
+  plugin.json        # hook declarations
+  README.md          # setup instructions
   hooks/
     capture.py       # PostToolBatch -> memoryhub-mcp upload
     recall.py        # SessionStart  -> memoryhub-mcp recall
-  skills/mh-config.md
+    check_config.py  # SessionStart  -> memoryhub-mcp config --check (setup nudge)
   tests/
 ```
 
@@ -44,7 +45,7 @@ Memory files are `~/.claude/projects/*/memory/**/*.md`. A file
 
 ## Hooks
 
-Declared in `plugin.json` (no `settings.json` editing). Both always exit 0 — a server outage
+Declared in `plugin.json` (no `settings.json` editing). All exit 0 — a server outage
 must never interrupt a session.
 
 - **capture** (`PostToolBatch`) — from the stdin `tool_calls`, keep `Write`/`Edit`/`MultiEdit`
@@ -52,28 +53,29 @@ must never interrupt a session.
   to `memoryhub-mcp upload --agent claude-code`.
 - **recall** (`SessionStart`) — run `memoryhub-mcp recall --agent claude-code` and emit its
   output as `additionalContext`; nothing on empty summary or failure.
+- **check-config** (`SessionStart`, matcher `startup|resume`) — run `memoryhub-mcp config
+--check`; on a non-zero exit (or a missing binary) emit a user-visible `systemMessage`
+  pointing at `memoryhub-mcp config`. Silent once configured.
 
 ## Identity & config
 
 `--agent claude-code` resolves to the same `agent_id` the MCP server uses for Claude Code, so the
 model's tool-writes and the hooks' uploads share one folder (assumes Claude Code's
 `clientInfo.name` slugs to `claude-code`; `MEMORYHUB_AGENT_ID` overrides). Connection config
-(`url`, `token`) is read from `<config_dir>/memoryhub/config.json`.
+(`url`, `token`) is read from `<config_dir>/memoryhub/config.toml`.
 
 ## Setup
 
-`/mh-config` writes `url` + `token` to `<config_dir>/memoryhub/config.json`. The `agent_id` file
-is created lazily on the first `upload`/`recall`. It no longer installs hooks (the manifest
-declares them).
-
-## Dropped
-
-`/mh-push`, the standalone HTTP client / identity / DTOs in `memoryhub.py`, and
-`~/.claude/memoryhub.json` — superseded by the MCP tools and delegation to the binary.
+Run `memoryhub-mcp config` once in a terminal to write `url` + `token` to
+`<config_dir>/memoryhub/config.toml`. Setup is interactive, so it is the user's step, not the
+agent's — there is no `/mh-config` skill (the agent must never drive the interactive command);
+the **check-config** hook reminds the user via `systemMessage` until it is done. The `agent_id`
+file is created lazily on the first `upload`/`recall`. Hooks are declared by the manifest.
 
 ## Testing
 
-- **Unit**: `PostToolBatch` parsing and path → `(project, filename)` mapping (no network).
+- **Unit**: `PostToolBatch` parsing and path → `(project, filename)` mapping; `recall`/
+  `check-config` output shaping (no network).
 - **Integration**: live server; a payload through `capture.py` → binary → server, verified via
   read; `recall.py` after a synthesis.
 

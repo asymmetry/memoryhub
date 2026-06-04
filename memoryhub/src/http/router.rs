@@ -24,7 +24,7 @@ pub fn build_router(state: HttpServerState) -> Router {
         .route("/memories/read", post(read_memory))
         .route("/memories/delete", post(delete_memory))
         .route("/memories/search", post(search_memory))
-        .route("/memories/summary", post(summary_memory))
+        .route("/memories/summary", post(get_summary))
         .route("/me", get(admin::me))
         .route(
             "/admin/users",
@@ -203,7 +203,7 @@ pub async fn search_memory(
     Ok(Json(SearchResponse { results }))
 }
 
-pub async fn summary_memory(
+pub async fn get_summary(
     State(state): State<HttpServerState>,
     user: AuthUser,
     Json(req): Json<SummaryRequest>,

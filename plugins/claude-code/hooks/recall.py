@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+
 """SessionStart hook: inject the latest synthesized summary via memoryhub-mcp recall."""
 
 import json

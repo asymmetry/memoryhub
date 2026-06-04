@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-set -euo pipefail
+
+set -e -o pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
 PLUGIN_DIR="$REPO_ROOT/plugins/claude-code"

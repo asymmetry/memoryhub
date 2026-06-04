@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+
 """PostToolBatch hook: upload memory files written this batch via memoryhub-mcp."""
 
 import json

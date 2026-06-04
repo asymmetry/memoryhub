@@ -8,7 +8,7 @@ With no subcommand it runs the stdio MCP server above; the `upload` and `recall`
 
 ## Crate layout
 
-A new top-level workspace member `memoryhub-mcp/` producing the binary `memoryhub-mcp`. It depends only on `rmcp` (official MCP Rust SDK, stdio transport), `reqwest` (`json`, `rustls`), `serde`/`serde_json`, `tokio`, `uuid`, and `thiserror` — **not** on the `memoryhub` crate, so no rusqlite / sqlite-vec / acktor links in and the binary stays small. The handful of request/response DTOs are small and stable, so they are **duplicated** here rather than shared through a new crate.
+A new top-level workspace member `memoryhub-mcp/` producing the binary `memoryhub-mcp`. It depends on `rmcp` (official MCP Rust SDK, stdio transport), `reqwest` (`json`, `rustls`), `serde`/`serde_json`, `toml` (config file), `tokio`, `uuid`, `thiserror`, `anyhow`, `clap` (CLI parsing), and `dirs` (config dir) — **not** on the `memoryhub` crate, so no rusqlite / sqlite-vec / acktor links in and the binary stays small. The handful of request/response DTOs are small and stable, so they are **duplicated** here rather than shared through a new crate.
 
 ## Configuration & agent identity
 
@@ -21,7 +21,7 @@ Configured by environment variables in the agent's MCP config block:
 }
 ```
 
-`MEMORYHUB_URL` and `MEMORYHUB_TOKEN` are required; a missing one → exit non-zero with a clear stderr message. Hook-CLI mode does not inherit the MCP block's env, so it reads the same two values from the env first, then from `<config_dir>/memoryhub/config.json` (`{url, token}`).
+`MEMORYHUB_URL` and `MEMORYHUB_TOKEN` are required; a missing one → exit non-zero with a clear stderr message. Hook-CLI mode does not inherit the MCP block's env, so it reads the same two values from the env first, then from `<config_dir>/memoryhub/config.toml` (`url`, `token`). The `config` subcommand writes that file interactively; `config --check` exits non-zero when neither env nor file supplies a url+token, which a plugin hook uses to detect that setup hasn't run.
 
 Memories are stored server-side under `{username}/{agent_id}/{project}/{filename}` (opaque UUID folder per agent). Each agent gets its own folder, so `agent_id` is resolved per agent, in order:
 
@@ -54,10 +54,10 @@ There are two ways to persist a memory; both store under `{username}/{agent_id}/
 
 Two subcommands the per-agent plugins call; they reuse the MCP tools' identity resolution, HTTP client, and DTOs.
 
-| Subcommand | Input                                                                  | Behavior                                                                                                                          |
-| ---------- | ---------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
+| Subcommand | Input                                                                                                     | Behavior                                                                                                                                             |
+| ---------- | --------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `upload`   | `--agent <name>` + `--project/--filename/--path`, or a JSON array of `{project, filename, path}` on stdin | Persist memory files — the `upload_memory` operation (shares `do_upload`). The stdin-batch form lets a hook spawn the binary once for several files. |
-| `recall`   | `--agent <name> [--scope user\|agent\|global]`                         | Print the latest synthesized summary for the scope (default `user`) for the plugin to inject; prints nothing when none exists.   |
+| `recall`   | `--agent <name> [--scope user\|agent\|global]`                                                            | Print the latest synthesized summary for the scope (default `user`) for the plugin to inject; prints nothing when none exists.                       |
 
 No `write` subcommand: inline `content` is model-only, and the hook layer always works from files on disk. `recall` calls `POST /v1/memories/summary` (see [http-server-design.md](http-server-design.md)).
 

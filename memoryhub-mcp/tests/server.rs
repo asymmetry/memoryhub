@@ -7,7 +7,7 @@ use wiremock::{
     matchers::{method, path},
 };
 
-use memoryhub_mcp::{client::MemoryHubClient, config::Config, server::McpServer};
+use memoryhub_mcp::{client::HttpClient, config::Config, server::McpServer};
 
 #[tokio::test]
 async fn client_lists_and_calls_tools() {
@@ -35,7 +35,7 @@ async fn client_lists_and_calls_tools() {
         token: "mh_tok".into(),
         agent_id: Some(Uuid::new_v4()),
     };
-    let client = MemoryHubClient::new(config.url.clone(), config.token.clone());
+    let client = HttpClient::new(config.url.clone(), config.token.clone());
     let server = McpServer::new(client, config, PathBuf::from("/nonexistent"));
 
     // In-memory transport: serve the server on one end, drive it with a real client on the other.

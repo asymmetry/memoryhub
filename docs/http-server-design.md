@@ -21,7 +21,7 @@ The `Principal` is inserted into request extensions; two extractors read it:
 - `AuthUser` — requires a real user, yields `username`; rejects `Root` (it has no memory namespace).
 - `AdminPrincipal` — requires `Root` or `role == "admin"`, else **403**.
 
-`AuthUser.username` is the namespace for every **write/read/delete**: the handler fills `username` from the token, not the request body, so a user only mutates and reads files under their own `{username}/…` tree. **Search is the exception** — its `scope` may be `all` (the default), which spans every user's memories and the shared summaries, so search deliberately reaches beyond the caller's namespace. Internal actor messages still carry `username` from the token.
+`AuthUser.username` is the namespace for every **write/read/delete**: the handler fills `username` from the token, not the request body, so a user only mutates and reads files under their own `{username}/…` tree. **Search and summary are the exceptions** — search's `all` scope and summary's `global` scope reach beyond the caller's namespace into the shared summaries (their `user`/`agent` scopes stay within it). Internal actor messages still carry `username` from the token.
 
 ## AuthStore
 
@@ -35,6 +35,8 @@ A token secret is `mh_` + base64url of 32 random bytes, returned **once** at cre
 
 All bodies are JSON; all routes nest under `/v1`. `filename` is opaque — any `/` or `\` is flattened to `_` server-side. `project` is an optional single segment (omitted → the reserved `_default` bucket; a value containing `/`/`\` or equal to `_synthesized`/`_default` is rejected with 400). Memory/search bodies carry no `username` (it comes from the token); token secrets are returned only by the mint endpoint.
 
+`POST /v1/memories/summary` returns the latest synthesized summary for a tier. `scope` is `user`/`agent`/`global` (the `SynthesisTarget` tiers); `agent_id` is required only for `scope=agent`. Reply `{content, path}`, or **404** if none exists yet.
+
 | Visibility | Method & path                            | Body                                      | Reply                                           |
 | ---------- | ---------------------------------------- | ----------------------------------------- | ----------------------------------------------- |
 | Public     | `GET /v1/health`                         | —                                         | `{"status":"ok"}`                               |
@@ -42,6 +44,7 @@ All bodies are JSON; all routes nest under `/v1`. `filename` is opaque — any `
 | User       | `POST /v1/memories/read`                 | `{agent_id, project?, filename}`          | `{"content":…}` or 404                          |
 | User       | `POST /v1/memories/delete`               | `{agent_id, project?, filename}`          | `{}`                                            |
 | User       | `POST /v1/memories/search`               | `{agent_id?, scope?, raw_only?, query}`   | `{"results":[…]}`                               |
+| User       | `POST /v1/memories/summary`              | `{agent_id?, scope}`                      | `{"content":…, "path":…}` or 404                |
 | User       | `GET /v1/me`                             | —                                         | `{username, role}`                              |
 | Admin      | `POST /v1/admin/users`                   | `{username, role}`                        | create user                                     |
 | Admin      | `GET /v1/admin/users`                    | —                                         | `{users:[{username, role, created_at}]}`        |

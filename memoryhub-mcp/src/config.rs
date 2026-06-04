@@ -1,6 +1,13 @@
 //! Runtime configuration loaded from environment variables.
 
+use std::env;
+use std::fs;
+use std::path::Path;
+
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
+
+use crate::error::ConfigError;
 
 /// Validated runtime configuration.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -10,22 +17,16 @@ pub struct Config {
     pub agent_id: Option<Uuid>,
 }
 
-/// Configuration errors surfaced at startup.
-#[derive(Debug, thiserror::Error, PartialEq, Eq)]
-pub enum ConfigError {
-    #[error("MEMORYHUB_URL is required")]
-    MissingUrl,
-
-    #[error("MEMORYHUB_TOKEN is required")]
-    MissingToken,
-
-    #[error("MEMORYHUB_AGENT_ID is not a valid UUID: {0}")]
-    BadAgentId(String),
+/// On-disk shape of `config.toml`: the hook-CLI credentials.
+#[derive(Debug, Default, Deserialize, Serialize)]
+pub struct FileConfig {
+    pub url: Option<String>,
+    pub token: Option<String>,
 }
 
 impl Config {
-    /// Builds a `Config` from already-read values. Empty strings are treated as absent.
-    pub fn load(
+    /// Builds a `Config` from values. Empty strings are treated as absent.
+    pub fn new(
         url: Option<String>,
         token: Option<String>,
         agent_id: Option<String>,
@@ -42,18 +43,35 @@ impl Config {
         };
 
         Ok(Config {
-            url: url.trim_end_matches('/').to_string(),
+            url,
             token,
             agent_id,
         })
     }
 
-    /// Reads the standard environment variables.
-    pub fn from_env() -> Result<Config, ConfigError> {
-        Config::load(
-            std::env::var("MEMORYHUB_URL").ok(),
-            std::env::var("MEMORYHUB_TOKEN").ok(),
-            std::env::var("MEMORYHUB_AGENT_ID").ok(),
+    /// Builds a `Config` from the standard environment variables.
+    pub fn from_envs() -> Result<Config, ConfigError> {
+        Config::new(
+            env::var("MEMORYHUB_URL").ok(),
+            env::var("MEMORYHUB_TOKEN").ok(),
+            env::var("MEMORYHUB_AGENT_ID").ok(),
+        )
+    }
+
+    /// Builds a `Config` from `config_file`, then lets the standard `MEMORYHUB_*` env vars
+    /// override the values.
+    pub fn from_file(config_file: &Path) -> Result<Config, ConfigError> {
+        let file: FileConfig = fs::read_to_string(config_file)
+            .ok()
+            .and_then(|s| toml::from_str(&s).ok())
+            .unwrap_or_default();
+
+        let env = |key: &str| env::var(key).ok().filter(|s| !s.is_empty());
+
+        Config::new(
+            env("MEMORYHUB_URL").or(file.url),
+            env("MEMORYHUB_TOKEN").or(file.token),
+            env("MEMORYHUB_AGENT_ID"),
         )
     }
 }
@@ -65,32 +83,33 @@ mod tests {
     #[test]
     fn load_requires_url_and_token() {
         assert_eq!(
-            Config::load(None, Some("t".into()), None).unwrap_err(),
+            Config::new(None, Some("t".into()), None).unwrap_err(),
             ConfigError::MissingUrl
         );
         assert_eq!(
-            Config::load(Some("u".into()), Some(String::new()), None).unwrap_err(),
+            Config::new(Some("u".into()), Some(String::new()), None).unwrap_err(),
             ConfigError::MissingToken
         );
     }
 
     #[test]
-    fn load_trims_trailing_slash_and_parses_override() {
+    fn load_passes_url_through_and_parses_override() {
+        // URL normalization lives in `HttpClient::new`, so `load` keeps the URL as-is.
         let id = "550e8400-e29b-41d4-a716-446655440000";
-        let cfg = Config::load(
+        let cfg = Config::new(
             Some("http://x:8000/".into()),
             Some("mh_tok".into()),
             Some(id.into()),
         )
         .unwrap();
-        assert_eq!(cfg.url, "http://x:8000");
+        assert_eq!(cfg.url, "http://x:8000/");
         assert_eq!(cfg.token, "mh_tok");
         assert_eq!(cfg.agent_id.unwrap().to_string(), id);
     }
 
     #[test]
     fn load_rejects_bad_override_uuid() {
-        let err = Config::load(
+        let err = Config::new(
             Some("u".into()),
             Some("t".into()),
             Some("not-a-uuid".into()),
@@ -101,7 +120,28 @@ mod tests {
 
     #[test]
     fn load_no_override_is_none() {
-        let cfg = Config::load(Some("u".into()), Some("t".into()), None).unwrap();
+        let cfg = Config::new(Some("u".into()), Some("t".into()), None).unwrap();
         assert!(cfg.agent_id.is_none());
+    }
+
+    #[test]
+    fn from_file_reads_file_when_env_absent() {
+        // Assumes the MEMORYHUB_* env vars are not set in the test environment.
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("config.toml");
+        std::fs::write(&file, "url = \"http://file:8000/\"\ntoken = \"file_tok\"\n").unwrap();
+
+        let cfg = Config::from_file(&file).unwrap();
+        // URL passed through; normalization is the client's job.
+        assert_eq!(cfg.url, "http://file:8000/");
+        assert_eq!(cfg.token, "file_tok");
+        assert!(cfg.agent_id.is_none());
+    }
+
+    #[test]
+    fn from_file_errors_when_missing() {
+        // Assumes the MEMORYHUB_* env vars are not set in the test environment.
+        let dir = tempfile::tempdir().unwrap();
+        assert!(Config::from_file(&dir.path().join("config.toml")).is_err());
     }
 }

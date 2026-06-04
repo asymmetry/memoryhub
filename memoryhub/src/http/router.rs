@@ -12,7 +12,8 @@ use super::error::HttpError;
 use super::middleware::{AuthUser, auth_middleware};
 use super::{HttpServerState, admin};
 use crate::memory::message::{
-    FileOpDelete, FileOpRead, FileOpWrite, Search, SearchResult, SearchScope,
+    FileOpDelete, FileOpRead, FileOpWrite, GetSummary, Search, SearchResult, SearchScope,
+    SummaryScope,
 };
 
 pub fn build_router(state: HttpServerState) -> Router {
@@ -23,6 +24,7 @@ pub fn build_router(state: HttpServerState) -> Router {
         .route("/memories/read", post(read_memory))
         .route("/memories/delete", post(delete_memory))
         .route("/memories/search", post(search_memory))
+        .route("/memories/summary", post(get_summary))
         .route("/me", get(admin::me))
         .route(
             "/admin/users",
@@ -88,6 +90,19 @@ pub struct SearchRequest {
 #[derive(Debug, Serialize)]
 pub struct SearchResponse {
     pub results: Vec<SearchResult>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SummaryRequest {
+    #[serde(default)]
+    pub agent_id: Option<Uuid>,
+    pub scope: SummaryScope,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SummaryResponse {
+    pub content: String,
+    pub path: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -188,6 +203,32 @@ pub async fn search_memory(
     Ok(Json(SearchResponse { results }))
 }
 
+pub async fn get_summary(
+    State(state): State<HttpServerState>,
+    user: AuthUser,
+    Json(req): Json<SummaryRequest>,
+) -> Result<Json<SummaryResponse>, HttpError> {
+    let msg = GetSummary {
+        username: user.username,
+        agent_id: req.agent_id,
+        scope: req.scope,
+    };
+    let summary = state
+        .memory_manager
+        .send(msg)
+        .await
+        .map_err(|e| HttpError::Unavailable(e.to_string()))?
+        .await
+        .map_err(|e| HttpError::Unavailable(e.to_string()))??;
+    match summary {
+        Some(s) => Ok(Json(SummaryResponse {
+            content: s.content,
+            path: s.path,
+        })),
+        None => Err(HttpError::NotFound),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -260,5 +301,19 @@ mod tests {
         let resp = HealthResponse { status: "ok" };
         let json = serde_json::to_string(&resp).unwrap();
         assert_eq!(json, r#"{"status":"ok"}"#);
+    }
+
+    #[test]
+    fn summary_request_deserializes_with_scope() {
+        let json = r#"{"agent_id":"550e8400-e29b-41d4-a716-446655440000","scope":"agent"}"#;
+        let req: SummaryRequest = serde_json::from_str(json).unwrap();
+        assert!(matches!(req.scope, SummaryScope::Agent));
+        assert!(req.agent_id.is_some());
+    }
+
+    #[test]
+    fn summary_request_allows_absent_agent_id() {
+        let req: SummaryRequest = serde_json::from_str(r#"{"scope":"user"}"#).unwrap();
+        assert!(req.agent_id.is_none());
     }
 }

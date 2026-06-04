@@ -4,21 +4,7 @@ use reqwest::Response;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-/// Errors from a MemoryHub API call.
-#[derive(Debug, thiserror::Error)]
-pub enum ClientError {
-    #[error("authentication failed — check MEMORYHUB_TOKEN")]
-    Unauthorized,
-
-    #[error("cannot reach MemoryHub at {0}")]
-    Unreachable(String),
-
-    #[error("MemoryHub returned {status}: {body}")]
-    Http { status: u16, body: String },
-
-    #[error("unexpected response from MemoryHub: {0}")]
-    Decode(String),
-}
+use crate::error::ClientError;
 
 #[derive(Debug, Serialize)]
 struct WriteRequest<'a> {
@@ -32,6 +18,8 @@ struct WriteRequest<'a> {
 #[derive(Debug, Serialize)]
 struct ReadRequest<'a> {
     agent_id: Uuid,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    project: Option<&'a str>,
     filename: &'a str,
 }
 
@@ -65,19 +53,32 @@ struct SearchResponse {
     results: Vec<SearchResult>,
 }
 
+#[derive(Debug, Serialize)]
+struct SummaryRequest<'a> {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    agent_id: Option<Uuid>,
+    scope: &'a str,
+}
+
+#[derive(Debug, Deserialize)]
+struct SummaryResponse {
+    content: String,
+}
+
 /// Client holding the base URL, bearer token, and a shared `reqwest::Client`.
 #[derive(Clone)]
-pub struct MemoryHubClient {
+pub struct HttpClient {
     http: reqwest::Client,
     base_url: String,
     token: String,
 }
 
-impl MemoryHubClient {
+impl HttpClient {
     pub fn new(base_url: String, token: String) -> Self {
         Self {
             http: reqwest::Client::new(),
-            base_url,
+            // Normalize here so request URLs (`{base_url}{path}`) never double up the slash.
+            base_url: base_url.trim_end_matches('/').to_string(),
             token,
         }
     }
@@ -164,16 +165,44 @@ impl MemoryHubClient {
     pub async fn read(
         &self,
         agent_id: Uuid,
+        project: Option<&str>,
         filename: &str,
     ) -> Result<Option<String>, ClientError> {
         let resp = self
-            .post("/v1/memories/read", &ReadRequest { agent_id, filename })
+            .post(
+                "/v1/memories/read",
+                &ReadRequest {
+                    agent_id,
+                    project,
+                    filename,
+                },
+            )
             .await?;
         if resp.status().as_u16() == 404 {
             return Ok(None);
         }
         let resp = Self::ensure_ok(resp).await?;
         let parsed: ReadResponse = resp
+            .json()
+            .await
+            .map_err(|e| ClientError::Decode(e.to_string()))?;
+        Ok(Some(parsed.content))
+    }
+
+    /// Proxies a `summary` to the MemoryHub API.
+    pub async fn summary(
+        &self,
+        agent_id: Option<Uuid>,
+        scope: &str,
+    ) -> Result<Option<String>, ClientError> {
+        let resp = self
+            .post("/v1/memories/summary", &SummaryRequest { agent_id, scope })
+            .await?;
+        if resp.status().as_u16() == 404 {
+            return Ok(None);
+        }
+        let resp = Self::ensure_ok(resp).await?;
+        let parsed: SummaryResponse = resp
             .json()
             .await
             .map_err(|e| ClientError::Decode(e.to_string()))?;
@@ -194,6 +223,12 @@ mod tests {
         Uuid::new_v4()
     }
 
+    #[test]
+    fn new_strips_trailing_slashes_from_base_url() {
+        let client = HttpClient::new("http://x:8000//".into(), "t".into());
+        assert_eq!(client.base_url, "http://x:8000");
+    }
+
     #[tokio::test]
     async fn search_parses_results_and_sends_bearer() {
         let server = MockServer::start().await;
@@ -209,7 +244,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let client = MemoryHubClient::new(server.uri(), "mh_tok".into());
+        let client = HttpClient::new(server.uri(), "mh_tok".into());
         let results = client.search(agent(), None, false, "hello").await.unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].path, "alice/abc/notes.md");
@@ -223,23 +258,26 @@ mod tests {
             .respond_with(ResponseTemplate::new(200).set_body_string("{}"))
             .mount(&server)
             .await;
-        let client = MemoryHubClient::new(server.uri(), "mh_tok".into());
+        let client = HttpClient::new(server.uri(), "mh_tok".into());
         client.write(agent(), None, "notes.md", "hi").await.unwrap();
     }
 
     #[tokio::test]
     async fn read_some_and_none() {
+        use wiremock::matchers::body_partial_json;
+
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/v1/memories/read"))
+            .and(body_partial_json(serde_json::json!({ "project": "notes" })))
             .respond_with(
                 ResponseTemplate::new(200).set_body_json(serde_json::json!({"content": "body"})),
             )
             .mount(&server)
             .await;
-        let client = MemoryHubClient::new(server.uri(), "mh_tok".into());
+        let client = HttpClient::new(server.uri(), "mh_tok".into());
         assert_eq!(
-            client.read(agent(), "x.md").await.unwrap(),
+            client.read(agent(), Some("notes"), "x.md").await.unwrap(),
             Some("body".to_string())
         );
 
@@ -249,8 +287,11 @@ mod tests {
             .respond_with(ResponseTemplate::new(404).set_body_string(r#"{"error":"not_found"}"#))
             .mount(&server404)
             .await;
-        let client404 = MemoryHubClient::new(server404.uri(), "mh_tok".into());
-        assert_eq!(client404.read(agent(), "missing.md").await.unwrap(), None);
+        let client404 = HttpClient::new(server404.uri(), "mh_tok".into());
+        assert_eq!(
+            client404.read(agent(), None, "missing.md").await.unwrap(),
+            None
+        );
     }
 
     #[tokio::test]
@@ -261,7 +302,7 @@ mod tests {
             .respond_with(ResponseTemplate::new(401).set_body_string(r#"{"error":"unauthorized"}"#))
             .mount(&server)
             .await;
-        let client = MemoryHubClient::new(server.uri(), "bad".into());
+        let client = HttpClient::new(server.uri(), "bad".into());
         let err = client.search(agent(), None, false, "q").await.unwrap_err();
         assert!(matches!(err, ClientError::Unauthorized));
     }
@@ -269,8 +310,54 @@ mod tests {
     #[tokio::test]
     async fn unreachable_maps_to_error() {
         // Nothing listening on this port.
-        let client = MemoryHubClient::new("http://127.0.0.1:1".into(), "t".into());
+        let client = HttpClient::new("http://127.0.0.1:1".into(), "t".into());
         let err = client.search(agent(), None, false, "q").await.unwrap_err();
         assert!(matches!(err, ClientError::Unreachable(_)));
+    }
+
+    #[test]
+    fn summary_request_omits_absent_agent_id() {
+        let body = serde_json::to_string(&SummaryRequest {
+            agent_id: None,
+            scope: "global",
+        })
+        .unwrap();
+        assert!(
+            !body.contains("agent_id"),
+            "agent_id should be omitted, got: {body}"
+        );
+        assert!(body.contains("\"scope\":\"global\""), "got: {body}");
+    }
+
+    #[tokio::test]
+    async fn summary_some_and_none() {
+        use wiremock::matchers::body_partial_json;
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/memories/summary"))
+            .and(body_partial_json(serde_json::json!({ "scope": "user" })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(
+                serde_json::json!({"content": "digest", "path": "alice/_synthesized/2026-06-03-01.md"}),
+            ))
+            .mount(&server)
+            .await;
+        let client = HttpClient::new(server.uri(), "mh_tok".into());
+        assert_eq!(
+            client.summary(Some(agent()), "user").await.unwrap(),
+            Some("digest".to_string())
+        );
+
+        let server404 = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/memories/summary"))
+            .respond_with(ResponseTemplate::new(404).set_body_string(r#"{"error":"not_found"}"#))
+            .mount(&server404)
+            .await;
+        let client404 = HttpClient::new(server404.uri(), "mh_tok".into());
+        assert_eq!(
+            client404.summary(Some(agent()), "user").await.unwrap(),
+            None
+        );
     }
 }

@@ -10,6 +10,7 @@ Bridges OpenClaw's workspace memory into MemoryHub and injects the team summary 
    ```json
    { "mcp": { "servers": { "memoryhub": { "command": "memoryhub-mcp" } } } }
    ```
+
 3. Install the hooks: copy `hooks/memoryhub-capture/` and `hooks/memoryhub-recall/` into `~/.openclaw/hooks/`, then:
 
    ```bash

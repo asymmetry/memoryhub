@@ -2,7 +2,14 @@
 name: memoryhub-capture
 description: "Upload OpenClaw workspace memory to MemoryHub on /new and /reset"
 metadata:
-  { "openclaw": { "emoji": "⬆️", "events": ["command:new", "command:reset"], "requires": { "bins": ["memoryhub-mcp"] } } }
+  {
+    "openclaw":
+      {
+        "emoji": "⬆️",
+        "events": ["command:new", "command:reset"],
+        "requires": { "bins": ["memoryhub-mcp"] },
+      },
+  }
 ---
 
 # MemoryHub Capture

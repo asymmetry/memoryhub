@@ -2,7 +2,14 @@
 name: memoryhub-recall
 description: "Inject the MemoryHub team summary into Project Context at agent bootstrap"
 metadata:
-  { "openclaw": { "emoji": "⬇️", "events": ["agent:bootstrap"], "requires": { "bins": ["memoryhub-mcp"] } } }
+  {
+    "openclaw":
+      {
+        "emoji": "⬇️",
+        "events": ["agent:bootstrap"],
+        "requires": { "bins": ["memoryhub-mcp"] },
+      },
+  }
 ---
 
 # MemoryHub Recall

@@ -36,3 +36,13 @@ def test_recall_format_context_wraps_additional_context():
 def test_recall_format_context_empty_is_none():
     assert recall.format_context("") is None
     assert recall.format_context("   ") is None
+
+
+import check_config  # noqa: E402
+
+
+def test_check_config_emit_shapes_system_message(capsys):
+    check_config.emit("hello")
+    out = capsys.readouterr().out
+    import json as _json
+    assert _json.loads(out) == {"systemMessage": "hello"}

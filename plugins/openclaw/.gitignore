@@ -1,0 +1,4 @@
+node_modules/
+# Negate inherited lib/ rule from root .gitignore (Python packaging pattern)
+!lib/
+!lib/**

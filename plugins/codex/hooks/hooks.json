@@ -1,0 +1,9 @@
+{
+  "hooks": {
+    "SessionStart": [
+      { "hooks": [{ "type": "command", "command": "python3 ${CODEX_PLUGIN_ROOT}/hooks/capture.py" }] },
+      { "hooks": [{ "type": "command", "command": "python3 ${CODEX_PLUGIN_ROOT}/hooks/recall.py" }] },
+      { "hooks": [{ "type": "command", "command": "python3 ${CODEX_PLUGIN_ROOT}/hooks/check_config.py" }] }
+    ]
+  }
+}

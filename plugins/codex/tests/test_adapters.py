@@ -22,3 +22,17 @@ def test_collect_items_globs_markdown_recursively(tmp_path):
 
 def test_collect_items_empty_when_dir_missing(tmp_path):
     assert capture.collect_items(tmp_path / "nope") == []
+
+
+import recall  # noqa: E402
+
+
+def test_recall_format_context_wraps_additional_context():
+    out = recall.format_context("digest")
+    assert out["hookSpecificOutput"]["hookEventName"] == "SessionStart"
+    assert out["hookSpecificOutput"]["additionalContext"] == "digest"
+
+
+def test_recall_format_context_empty_is_none():
+    assert recall.format_context("") is None
+    assert recall.format_context("   ") is None

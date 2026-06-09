@@ -31,7 +31,10 @@ def test_collect_items_dedups_and_filters():
         "tool_calls": [
             {"tool_name": "Write", "tool_input": {"file_path": mem}},
             {"tool_name": "Edit", "tool_input": {"file_path": mem}},  # dup
-            {"tool_name": "Write", "tool_input": {"file_path": "/tmp/x.md"}},  # not memory
+            {
+                "tool_name": "Write",
+                "tool_input": {"file_path": "/tmp/x.md"},
+            },  # not memory
             {"tool_name": "Read", "tool_input": {"file_path": mem}},  # not a write tool
         ]
     }
@@ -55,20 +58,26 @@ def _run_main():
 
 
 def test_check_config_silent_when_configured(monkeypatch, capsys):
-    monkeypatch.setattr(check_config.subprocess, "run", Mock(return_value=Mock(returncode=0)))
+    monkeypatch.setattr(
+        check_config.subprocess, "run", Mock(return_value=Mock(returncode=0))
+    )
     _run_main()
     assert capsys.readouterr().out == ""
 
 
 def test_check_config_nudges_when_unconfigured(monkeypatch, capsys):
-    monkeypatch.setattr(check_config.subprocess, "run", Mock(return_value=Mock(returncode=1)))
+    monkeypatch.setattr(
+        check_config.subprocess, "run", Mock(return_value=Mock(returncode=1))
+    )
     _run_main()
     out = json.loads(capsys.readouterr().out)
     assert out["systemMessage"] == check_config.NOT_CONFIGURED
 
 
 def test_check_config_reports_missing_binary(monkeypatch, capsys):
-    monkeypatch.setattr(check_config.subprocess, "run", Mock(side_effect=FileNotFoundError))
+    monkeypatch.setattr(
+        check_config.subprocess, "run", Mock(side_effect=FileNotFoundError)
+    )
     _run_main()
     out = json.loads(capsys.readouterr().out)
     assert out["systemMessage"] == check_config.NOT_INSTALLED

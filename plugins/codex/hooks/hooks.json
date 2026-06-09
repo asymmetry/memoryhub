@@ -1,0 +1,33 @@
+{
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 ${CODEX_PLUGIN_ROOT}/hooks/capture.py"
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 ${CODEX_PLUGIN_ROOT}/hooks/recall.py"
+          }
+        ]
+      },
+      {
+        "matcher": "startup|resume",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 ${CODEX_PLUGIN_ROOT}/hooks/check_config.py"
+          }
+        ]
+      }
+    ]
+  }
+}

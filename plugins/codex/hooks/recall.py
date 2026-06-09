@@ -22,7 +22,7 @@ def format_context(summary: str) -> dict | None:
 def main() -> None:
     try:
         result = subprocess.run(
-            ["memoryhub-mcp", "recall", "--agent", "claude-code", "--scope", "global"],
+            ["memoryhub-mcp", "recall", "--agent", "codex", "--scope", "global"],
             capture_output=True,
             text=True,
             check=False,

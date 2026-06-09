@@ -1,0 +1,1 @@
+# MemoryHub plugin for OpenClaw

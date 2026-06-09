@@ -1,0 +1,6 @@
+{
+  "name": "memoryhub",
+  "version": "0.1.0",
+  "description": "Deterministic MemoryHub sync for Codex (capture + recall + check-config hooks)",
+  "hooks": "./hooks/hooks.json"
+}

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 
-"""PostToolBatch hook: upload memory files written this batch via memoryhub-mcp."""
+"""PostToolBatch hook: upload memory files edited this batch to memoryhub."""
 
 import json
 import subprocess
@@ -22,7 +22,6 @@ def is_memory_path(path: Path) -> bool:
 
 def to_item(path: Path) -> dict:
     rel = path.relative_to(PROJECTS_DIR)
-    # rel = <hash>/memory/<...>.md
     return {
         "project": rel.parts[0],
         "filename": str(Path(*rel.parts[1:])),
@@ -50,10 +49,12 @@ def main() -> None:
     try:
         payload = json.load(sys.stdin)
     except (json.JSONDecodeError, ValueError):
-        sys.exit(0)
+        return
     items = collect_items(payload)
+
     if not items:
-        sys.exit(0)
+        return
+
     try:
         subprocess.run(
             ["memoryhub-mcp", "upload", "--agent", "claude-code"],
@@ -63,8 +64,8 @@ def main() -> None:
         )
     except FileNotFoundError:
         print("[memoryhub] memoryhub-mcp not found on PATH", file=sys.stderr)
-    sys.exit(0)
 
 
 if __name__ == "__main__":
     main()
+    sys.exit(0)

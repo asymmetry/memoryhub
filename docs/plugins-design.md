@@ -28,16 +28,17 @@ Python `command` hooks in `plugin.json`. Memory: `~/.claude/projects/<hash>/memo
 
 Hooks mirror Claude Code (`PostToolUse`, `SessionStart` with `additionalContext`) — Python `command` hooks via `plugin.json` → `hooks.json`. MCP via `[mcp_servers.<id>]` in `config.toml`. Self-synthesizing native memory at `~/.codex/memories/` (user-global): `rollout_summaries/` (raw per-thread) + `MEMORY.md` (consolidated).
 
-- **capture** (`SessionStart`): upload `~/.codex/memories/` (fixed `project` bucket) — the `rollout_summaries/` entries primary, `MEMORY.md` optional.
+- **capture** (`Stop`): upload the raw `rollout_summaries/` entries under `~/.codex/memories/` (fixed `project` bucket); the consolidated `MEMORY.md` is skipped, since MemoryHub re-synthesizes from raw entries and uploading Codex's own consolidation would double-synthesize. `Stop` (turn end), not `SessionStart`: Codex flushes its self-synthesized memory at turn/thread end, so capturing at session start would upload stale memory and miss the final turn.
 - **recall** (`SessionStart`): inject `memoryhub-mcp recall --agent codex` as `additionalContext`.
+- **check-config** (`SessionStart`): `config --check` → `systemMessage` nudge when unconfigured.
 - **identity:** `--agent codex`.
 
 ## OpenClaw
 
 In-process **TypeScript** hooks (`handler.ts`), so the adapter spawns the binary or calls the HTTP API. MCP via `~/.openclaw/openclaw.json` (`mcp.servers`). Self-synthesizing native memory under `~/.openclaw/workspace/`: `MEMORY.md` + `memory/YYYY-MM-DD.md` daily notes (auto-loaded each session).
 
-- **capture:** a `handler.ts` on the memory-write lifecycle (`command:new` / `command:reset` / compaction) uploads the daily notes via `memoryhub-mcp upload --agent openclaw`.
-- **recall:** no context-injection hook (open upstream request), so **write the team summary into an auto-loaded memory file** (e.g. `memory/_memoryhub.md`); else fall back to `search_memory`.
+- **capture:** a `handler.ts` on the session-archive lifecycle (`command:new` / `command:reset`) uploads the daily notes via `memoryhub-mcp upload --agent openclaw`. Not on `session:compact:after`: that event's context carries only compaction stats, no `workspaceDir`, so the handler can't locate `<workspace>/memory/` — memory written in a session that is compacted (rather than ended via `/new` or `/reset`) is captured at the next archive.
+- **recall:** a `handler.ts` on `agent:bootstrap` injects the team summary **in memory** by mutating `context.bootstrapFiles` (appends to the `MEMORY.md` bootstrap entry, or pushes a new one) — the model sees it in Project Context with **no disk write**, so capture never re-uploads it.
 - **identity:** `--agent openclaw`.
 
 ## To verify

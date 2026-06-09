@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 
-"""SessionStart hook: upload Codex's memory files (~/.codex/memories/) via memoryhub-mcp."""
+"""Stop hook: upload Codex's memory files to memoryhub."""
 
 import json
 import os
@@ -21,7 +21,10 @@ def collect_items(root: Path) -> list[dict]:
         if not path.is_file():
             continue
         rel = path.relative_to(root)
-        # project omitted -> server's _default bucket; filename is the memories-relative path.
+        # Skip the consolidated MEMORY.md: MemoryHub re-synthesizes from raw
+        # entries, so uploading Codex's own consolidation would double-synthesize.
+        if rel.as_posix() == "MEMORY.md":
+            continue
         items.append({"filename": rel.as_posix(), "path": str(path)})
     return items
 
@@ -29,7 +32,8 @@ def collect_items(root: Path) -> list[dict]:
 def main() -> None:
     items = collect_items(memories_dir())
     if not items:
-        sys.exit(0)
+        return
+
     try:
         subprocess.run(
             ["memoryhub-mcp", "upload", "--agent", "codex"],
@@ -39,8 +43,8 @@ def main() -> None:
         )
     except FileNotFoundError:
         print("[memoryhub] memoryhub-mcp not found on PATH", file=sys.stderr)
-    sys.exit(0)
 
 
 if __name__ == "__main__":
     main()
+    sys.exit(0)

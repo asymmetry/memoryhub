@@ -16,7 +16,7 @@ const handler = async (event: any) => {
             "--agent",
             "openclaw",
             "--scope",
-            "user",
+            "global",
         ]);
         summary = (stdout ?? "").trim();
     } catch {
@@ -24,7 +24,7 @@ const handler = async (event: any) => {
     }
     if (!summary) return;
 
-    const block = `\n\n## MemoryHub team summary\n\n${summary}\n`;
+    const block = `\n\n## MemoryHub summary\n\n${summary}\n`;
     const mem = files.find((f: any) => f?.name === MEMORY_FILE);
     if (mem) {
         mem.content = (mem.content ?? "") + block;

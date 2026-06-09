@@ -45,15 +45,15 @@ def collect_items(payload: dict) -> list[dict]:
     return items
 
 
-def main() -> int:
+def main() -> None:
     try:
         payload = json.load(sys.stdin)
     except (json.JSONDecodeError, ValueError):
-        return 0
+        return
     items = collect_items(payload)
 
     if not items:
-        return 0
+        return
 
     try:
         subprocess.run(
@@ -65,8 +65,7 @@ def main() -> int:
     except FileNotFoundError:
         print("[memoryhub] memoryhub-mcp not found on PATH", file=sys.stderr)
 
-    return 0
-
 
 if __name__ == "__main__":
-    sys.exit(main())
+    main()
+    sys.exit(0)

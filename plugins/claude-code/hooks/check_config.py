@@ -1,23 +1,19 @@
 #!/usr/bin/env python3
 
-"""SessionStart hook: nudge the user to run `memoryhub-mcp config` when unconfigured.
-
-Runs `memoryhub-mcp config --check` (quiet, non-interactive). A non-zero exit means the
-URL/token aren't set up yet, so we surface a user-visible `systemMessage`. Setup itself is
-interactive and must be run by the user in a terminal — never by the agent.
-"""
+"""SessionStart hook: nudge the user to run `memoryhub-mcp config` when
+unconfigured."""
 
 import json
 import subprocess
 import sys
 
 NOT_CONFIGURED = (
-    "MemoryHub isn't configured — run `memoryhub-mcp config` in your terminal to set the "
-    "server URL and token. Memories won't sync until then."
+    "MemoryHub MCP server isn't configured: run `memoryhub-mcp config` in your "
+    "terminal to set the server URL and token."
 )
 NOT_INSTALLED = (
-    "MemoryHub: `memoryhub-mcp` isn't on your PATH. Install it, then run "
-    "`memoryhub-mcp config` to set the server URL and token."
+    "`memoryhub-mcp` isn't on your PATH. Install it, then run `memoryhub-mcp "
+    "config` to set the server URL and token."
 )
 
 
@@ -34,11 +30,12 @@ def main() -> None:
         )
     except FileNotFoundError:
         emit(NOT_INSTALLED)
-        sys.exit(0)
+        return
+
     if result.returncode != 0:
         emit(NOT_CONFIGURED)
-    sys.exit(0)
 
 
 if __name__ == "__main__":
     main()
+    sys.exit(0)

@@ -1,6 +1,6 @@
 ---
 name: memoryhub-capture
-description: "Upload OpenClaw workspace memory to MemoryHub on /new and /reset"
+description: "Upload OpenClaw workspace memory to MemoryHub"
 metadata:
   {
     "openclaw":
@@ -14,5 +14,4 @@ metadata:
 
 # MemoryHub Capture
 
-Uploads the workspace daily notes (`<workspace>/memory/*.md`) to MemoryHub via
-`memoryhub-mcp upload --agent openclaw` whenever a session is archived (`/new`, `/reset`).
+Uploads the workspace daily notes (`<workspace>/memory/*.md`) to MemoryHub whenever a session is archived (`/new`, `/reset`).

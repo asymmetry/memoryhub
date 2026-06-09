@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-set -euo pipefail
+
+set -e -o pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
 PLUGIN_DIR="$REPO_ROOT/plugins/codex"
@@ -38,6 +39,7 @@ for i in $(seq 1 30); do
   sleep 1
 done
 
+# Bootstrap a user + token.
 curl -sf -X POST http://127.0.0.1:19877/v1/admin/users \
   -H "Authorization: Bearer $ROOT_TOKEN" -H "Content-Type: application/json" \
   -d '{"username":"testuser","role":"user"}' > /dev/null
@@ -45,19 +47,21 @@ USER_TOKEN=$(curl -sf -X POST http://127.0.0.1:19877/v1/admin/users/testuser/tok
   -H "Authorization: Bearer $ROOT_TOKEN" -H "Content-Type: application/json" \
   -d '{"name":"integration"}' | python3 -c "import sys, json; print(json.load(sys.stdin)['token'])")
 
+# Hook environment: the binary reads url/token/agent_id from env.
 export MEMORYHUB_URL="http://127.0.0.1:19877"
 export MEMORYHUB_TOKEN="$USER_TOKEN"
 export MEMORYHUB_AGENT_ID="$AGENT_ID"
 export CODEX_HOME="$TMP/.codex"
 
+# Test memory files.
 mkdir -p "$CODEX_HOME/memories/rollout_summaries"
 echo "# Durable memory" > "$CODEX_HOME/memories/MEMORY.md"
 echo "thread summary" > "$CODEX_HOME/memories/rollout_summaries/x.md"
 
-# Drive the capture hook (it enumerates $CODEX_HOME/memories and uploads).
+# Drive the capture hook.
 python3 "$PLUGIN_DIR/hooks/capture.py" < /dev/null
 
-# Verify both files via the read API.
+# Verify via the read API.
 for FN in "MEMORY.md" "rollout_summaries/x.md"; do
   RESP=$(curl -sf -X POST http://127.0.0.1:19877/v1/memories/read \
     -H "Authorization: Bearer $USER_TOKEN" -H "Content-Type: application/json" \
@@ -65,7 +69,7 @@ for FN in "MEMORY.md" "rollout_summaries/x.md"; do
   echo "$RESP" | python3 -c "import sys, json; d=json.load(sys.stdin); assert d.get('content'), f'empty: {d}'; print('read ok: $FN')"
 done
 
-# Drive recall best-effort.
+# Drive the recall hook. It must run and exit 0.
 sleep 3
 RECALL_OUT=$(python3 "$PLUGIN_DIR/hooks/recall.py")
 if [ -n "$RECALL_OUT" ]; then

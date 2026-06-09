@@ -14,7 +14,7 @@ AGENT_ID="00000000-0000-0000-0000-000000000001"
 cargo build --manifest-path "$REPO_ROOT/memoryhub-mcp/Cargo.toml"
 export PATH="$REPO_ROOT/target/debug:$PATH"
 
-# Server config: mock LLM (no API keys) + in-memory auth db.
+# Server config: mock LLM + in-memory auth db.
 mkdir -p "$TMP/mhdata"
 cat > "$TMP/mhdata/config.toml" <<EOF
 [llm]
@@ -47,24 +47,23 @@ USER_TOKEN=$(curl -sf -X POST http://127.0.0.1:19876/v1/admin/users/testuser/tok
   -H "Authorization: Bearer $ROOT_TOKEN" -H "Content-Type: application/json" \
   -d '{"name":"integration"}' | python3 -c "import sys, json; print(json.load(sys.stdin)['token'])")
 
-# Hook environment: the binary reads url/token/agent_id from env. HOME so capture.py's
-# PROJECTS_DIR (~/.claude/projects) resolves under the temp dir.
+# Hook environment: the binary reads url/token/agent_id from env.
 export MEMORYHUB_URL="http://127.0.0.1:19876"
 export MEMORYHUB_TOKEN="$USER_TOKEN"
 export MEMORYHUB_AGENT_ID="$AGENT_ID"
 export HOME="$TMP"
 
-# A memory file under ~/.claude/projects/<hash>/memory.
+# Test memory files.
 MEMORY_DIR="$TMP/.claude/projects/proj-hash/memory"
 mkdir -p "$MEMORY_DIR"
 echo "# Test Memory" > "$MEMORY_DIR/test.md"
 
-# Drive the capture hook with a PostToolBatch payload.
+# Drive the capture hook.
 python3 "$PLUGIN_DIR/hooks/capture.py" <<EOF
 {"tool_calls": [{"tool_name": "Write", "tool_input": {"file_path": "$MEMORY_DIR/test.md"}}]}
 EOF
 
-# Verify via the read API: project=proj-hash, filename=memory/test.md.
+# Verify via the read API.
 RESPONSE=$(curl -sf -X POST http://127.0.0.1:19876/v1/memories/read \
   -H "Authorization: Bearer $USER_TOKEN" -H "Content-Type: application/json" \
   -d "{\"agent_id\":\"$AGENT_ID\",\"project\":\"proj-hash\",\"filename\":\"memory/test.md\"}")
@@ -76,7 +75,7 @@ print('capture -> upload -> read: OK')
 "
 
 # Drive the recall hook. It must run and exit 0, emitting either nothing or a
-# SessionStart additionalContext JSON (synthesis timing is best-effort).
+# SessionStart additionalContext JSON.
 sleep 3
 RECALL_OUT=$(python3 "$PLUGIN_DIR/hooks/recall.py")
 if [ -n "$RECALL_OUT" ]; then

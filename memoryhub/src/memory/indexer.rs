@@ -275,11 +275,19 @@ fn do_delete(conn: &Connection, path: &str) -> Result<(), IndexError> {
     Ok(())
 }
 
+/// Escapes the SQL `LIKE` wildcards (`\`, `%`, `_`) so a username containing them can't widen
+/// the scope prefix and match another user's path. Paired with an `ESCAPE '\'` clause.
+fn like_escape(s: &str) -> String {
+    s.replace('\\', "\\\\")
+        .replace('%', "\\%")
+        .replace('_', "\\_")
+}
+
 fn do_search(conn: &Connection, msg: &IndexSearch) -> Result<Vec<SearchResult>, IndexError> {
     let path_prefix = match msg.scope {
         SearchScope::All => "%".to_string(),
-        SearchScope::User => format!("{}/%", msg.username),
-        SearchScope::Agent => format!("{}/{}/%", msg.username, msg.agent_id),
+        SearchScope::User => format!("{}/%", like_escape(&msg.username)),
+        SearchScope::Agent => format!("{}/{}/%", like_escape(&msg.username), msg.agent_id),
     };
     let source_clause = if msg.raw_only {
         " AND f.source = 'raw'"
@@ -291,7 +299,7 @@ fn do_search(conn: &Connection, msg: &IndexSearch) -> Result<Vec<SearchResult>, 
          FROM chunks_vec cv
          JOIN chunks c ON c.id = cv.chunk_id
          JOIN files f ON f.path = c.path
-         WHERE cv.embedding MATCH ?1 AND k = ?2 AND c.path LIKE ?3{source_clause}
+         WHERE cv.embedding MATCH ?1 AND k = ?2 AND c.path LIKE ?3 ESCAPE '\\'{source_clause}
          ORDER BY cv.distance ASC"
     );
 
@@ -457,6 +465,63 @@ mod tests {
 
         assert!(!results.is_empty());
         assert_eq!(results[0].path, "alice/agent1/daily_note/2026-03-31.md");
+    }
+
+    #[tokio::test]
+    async fn user_scope_does_not_leak_across_underscore_usernames() {
+        // Usernames `a_b` and `axb` are both valid, but a `_` in a LIKE pattern is a
+        // single-char wildcard, so an unescaped `a_b/%` would also match `axb/...`.
+        let index = test_index();
+        let (addr, _handle) = index.start("index-test").unwrap();
+
+        addr.send(EnsureVecReady { dim: 4 })
+            .await
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap();
+
+        for owner in ["a_b", "axb"] {
+            addr.send(IndexInsert {
+                path: format!("{owner}/agent1/note.md"),
+                source: "raw".to_string(),
+                size: 10,
+                model: "mock".to_string(),
+                chunks: vec![Chunk {
+                    text: format!("note for {owner}"),
+                    start_line: 1,
+                    end_line: 1,
+                    embedding: Embedding(vec![0.0; 4]),
+                }],
+            })
+            .await
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap();
+        }
+
+        let results = addr
+            .send(IndexSearch {
+                embeddings: vec![Embedding(vec![0.0; 4])],
+                username: "a_b".to_string(),
+                agent_id: Uuid::parse_str("00000000-0000-0000-0000-000000000001").unwrap(),
+                scope: super::super::message::SearchScope::User,
+                raw_only: false,
+                limit: 10,
+            })
+            .await
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert!(!results.is_empty(), "a_b's own note should be found");
+        assert!(
+            results.iter().all(|r| r.path.starts_with("a_b/")),
+            "search scoped to a_b leaked another user's memory: {:?}",
+            results.iter().map(|r| &r.path).collect::<Vec<_>>()
+        );
     }
 
     #[tokio::test]

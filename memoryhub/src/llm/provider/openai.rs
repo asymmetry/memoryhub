@@ -5,13 +5,12 @@ use std::pin::Pin;
 use std::time::Duration;
 
 use acktor::ErrorReport;
-use acktor::utils::debug_trace;
 use reqwest::{Client, StatusCode};
 use serde::{Deserialize, Serialize};
+use tracing::debug;
 
-use crate::llm::config::LlmConfig;
-use crate::llm::provider::{ChatMessage, ChatResponse, EmbeddingProvider, Provider, Role};
-use crate::llm::{EmbedResult, Embedding, LlmError};
+use super::super::{EmbedResult, Embedding, config::LlmConfig, error::LlmError};
+use super::{ChatMessage, ChatResponse, EmbeddingProvider, Provider, Role};
 
 pub struct OpenAiProvider {
     http: Client,
@@ -69,6 +68,10 @@ struct EmbedRequest<'a> {
 
 #[derive(Deserialize)]
 struct EmbedResponseData {
+    /// Position of this embedding in the input array. OpenAI always sets it; we
+    /// sort on it so a reordered `data` array can't mis-align embeddings to chunks.
+    #[serde(default)]
+    index: usize,
     embedding: Vec<f32>,
 }
 
@@ -152,7 +155,8 @@ impl Provider for OpenAiProvider {
     ) -> Pin<Box<dyn Future<Output = Result<ChatResponse, LlmError>> + Send + 'a>> {
         Box::pin(async move {
             let url = format!("{}/chat/completions", self.base_url);
-            debug_trace!(
+
+            debug!(
                 "Sending chat with {} messages to OpenAI at {}",
                 messages.len(),
                 url
@@ -204,7 +208,8 @@ impl EmbeddingProvider for OpenAiProvider {
     ) -> Pin<Box<dyn Future<Output = Result<EmbedResult, LlmError>> + Send + 'a>> {
         Box::pin(async move {
             let url = format!("{}/embeddings", self.base_url);
-            debug_trace!("Embedding {} texts via OpenAI at {}", texts.len(), url);
+
+            debug!("Embedding {} texts via OpenAI at {}", texts.len(), url);
 
             let resp = self
                 .http
@@ -218,7 +223,18 @@ impl EmbeddingProvider for OpenAiProvider {
                 .await
                 .map_err(map_reqwest)?;
             let resp = map_status(resp).await?;
-            let parsed: EmbedResponse = resp.json().await.map_err(map_reqwest)?;
+            let mut parsed: EmbedResponse = resp.json().await.map_err(map_reqwest)?;
+
+            // the provider must return exactly one embedding per input
+            if parsed.data.len() != texts.len() {
+                return Err(LlmError::Provider(format!(
+                    "embedding count mismatch: requested {} texts but provider returned {}",
+                    texts.len(),
+                    parsed.data.len()
+                )));
+            }
+            // reorder into input order
+            parsed.data.sort_by_key(|d| d.index);
 
             Ok(EmbedResult {
                 model: parsed.model,
@@ -280,6 +296,52 @@ mod tests {
         assert_eq!(out.model, "text-embedding-3-small");
         assert_eq!(out.embeddings.len(), 2);
         assert_eq!(out.embeddings[0].0, vec![0.1, 0.2, 0.3]);
+    }
+
+    #[tokio::test]
+    async fn embed_rejects_count_mismatch() {
+        let server = MockServer::start().await;
+        // Two inputs, but the provider returns only one embedding.
+        Mock::given(method("POST"))
+            .and(path("/embeddings"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "model": "text-embedding-3-small",
+                "data": [ { "index": 0, "embedding": [0.1, 0.2, 0.3] } ]
+            })))
+            .mount(&server)
+            .await;
+
+        let p = OpenAiProvider::new_embedding(&config_for(&server)).unwrap();
+        let err = p
+            .embed(&["a".to_string(), "b".to_string()])
+            .await
+            .unwrap_err();
+
+        assert!(matches!(err, LlmError::Provider(_)));
+    }
+
+    #[tokio::test]
+    async fn embed_orders_results_by_index() {
+        let server = MockServer::start().await;
+        // Returned out of input order: index 1 first, index 0 second.
+        Mock::given(method("POST"))
+            .and(path("/embeddings"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "model": "text-embedding-3-small",
+                "data": [
+                    { "index": 1, "embedding": [0.4, 0.5, 0.6] },
+                    { "index": 0, "embedding": [0.1, 0.2, 0.3] }
+                ]
+            })))
+            .mount(&server)
+            .await;
+
+        let p = OpenAiProvider::new_embedding(&config_for(&server)).unwrap();
+        let out = p.embed(&["a".to_string(), "b".to_string()]).await.unwrap();
+
+        // The embedding for input 0 must come first, regardless of response order.
+        assert_eq!(out.embeddings[0].0, vec![0.1, 0.2, 0.3]);
+        assert_eq!(out.embeddings[1].0, vec![0.4, 0.5, 0.6]);
     }
 
     #[tokio::test]

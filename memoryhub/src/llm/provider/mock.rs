@@ -1,10 +1,11 @@
 //! `MockProvider` — a test `Provider` that records calls and replays scripted
 //! responses. Used by tests in this crate and by integration tests.
 
+use std::pin::Pin;
 use std::sync::Mutex;
 
-use super::*;
-use crate::llm::Embedding;
+use super::super::{EmbedResult, Embedding, error::LlmError};
+use super::{ChatMessage, ChatResponse, EmbeddingProvider, Provider};
 
 /// A `Provider` that records calls and replays scripted responses.
 #[derive(Default)]

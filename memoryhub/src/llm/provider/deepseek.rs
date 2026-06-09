@@ -5,13 +5,12 @@ use std::pin::Pin;
 use std::time::Duration;
 
 use acktor::ErrorReport;
-use acktor::utils::debug_trace;
 use reqwest::{Client, StatusCode};
 use serde::{Deserialize, Serialize};
+use tracing::debug;
 
-use crate::llm::LlmError;
-use crate::llm::config::LlmConfig;
-use crate::llm::provider::{ChatMessage, ChatResponse, Provider, Role};
+use super::super::{config::LlmConfig, error::LlmError};
+use super::{ChatMessage, ChatResponse, Provider, Role};
 
 pub struct DeepSeekProvider {
     http: Client,
@@ -118,7 +117,8 @@ impl Provider for DeepSeekProvider {
     ) -> Pin<Box<dyn Future<Output = Result<ChatResponse, LlmError>> + Send + 'a>> {
         Box::pin(async move {
             let url = format!("{}/chat/completions", self.base_url);
-            debug_trace!(
+
+            debug!(
                 "Sending chat with {} messages to DeepSeek at {}",
                 messages.len(),
                 url

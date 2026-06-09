@@ -82,11 +82,12 @@ impl EmbeddingProvider for MockProvider {
     ) -> Pin<Box<dyn Future<Output = Result<EmbedResult, LlmError>> + Send + 'a>> {
         self.embed_calls.lock().unwrap().push(texts.to_vec());
         let reply = self.embed_replies.lock().unwrap().pop().unwrap_or_else(|| {
-            // Permissive default: zero vectors so unrelated tests that
-            // don't care about embedding values still work.
+            // Permissive default: a uniform non-zero vector. (Zero vectors have an undefined
+            // cosine distance, so they would be dropped by search.) Unrelated tests that don't
+            // care about embedding values still work.
             Ok(EmbedResult {
                 model: "mock-default".into(),
-                embeddings: texts.iter().map(|_| Embedding(vec![0.0; 4])).collect(),
+                embeddings: texts.iter().map(|_| Embedding(vec![0.1; 4])).collect(),
             })
         });
         Box::pin(async move { reply })

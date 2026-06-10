@@ -1,10 +1,17 @@
 //! Thin HTTP client over the MemoryHub `/v1` API.
 
+use std::time::Duration;
+
 use reqwest::Response;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::error::ClientError;
+
+/// Caps how long we wait to establish a connection to MemoryHub.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+/// Caps total time per request, so a hung or slow server can't stall the host agent's session.
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Serialize)]
 struct WriteRequest<'a> {
@@ -75,8 +82,17 @@ pub struct HttpClient {
 
 impl HttpClient {
     pub fn new(base_url: String, token: String) -> Self {
+        Self::with_timeout(base_url, token, CONNECT_TIMEOUT, REQUEST_TIMEOUT)
+    }
+
+    fn with_timeout(base_url: String, token: String, connect: Duration, request: Duration) -> Self {
+        let http = reqwest::Client::builder()
+            .connect_timeout(connect)
+            .timeout(request)
+            .build()
+            .expect("failed to build HTTP client");
         Self {
-            http: reqwest::Client::new(),
+            http,
             // Normalize here so request URLs (`{base_url}{path}`) never double up the slash.
             base_url: base_url.trim_end_matches('/').to_string(),
             token,
@@ -312,6 +328,36 @@ mod tests {
         // Nothing listening on this port.
         let client = HttpClient::new("http://127.0.0.1:1".into(), "t".into());
         let err = client.search(agent(), None, false, "q").await.unwrap_err();
+        assert!(matches!(err, ClientError::Unreachable(_)));
+    }
+
+    #[tokio::test]
+    async fn slow_server_times_out_quickly() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/memories/search"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_delay(Duration::from_secs(5))
+                    .set_body_json(serde_json::json!({ "results": [] })),
+            )
+            .mount(&server)
+            .await;
+
+        // A 200ms request timeout against a 5s-delayed response must error fast, not hang.
+        let client = HttpClient::with_timeout(
+            server.uri(),
+            "t".into(),
+            Duration::from_millis(200),
+            Duration::from_millis(200),
+        );
+        let start = std::time::Instant::now();
+        let err = client.search(agent(), None, false, "q").await.unwrap_err();
+        assert!(
+            start.elapsed() < Duration::from_secs(2),
+            "request should have timed out fast, took {:?}",
+            start.elapsed()
+        );
         assert!(matches!(err, ClientError::Unreachable(_)));
     }
 

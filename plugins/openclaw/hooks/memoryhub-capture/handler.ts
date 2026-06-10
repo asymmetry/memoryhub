@@ -2,6 +2,8 @@ import { spawn } from "node:child_process";
 import { join } from "node:path";
 import { collectItems } from "../../lib/items.ts";
 
+const TIMEOUT_MS = 10_000;
+
 const handler = async (event: any) => {
     if (
         event.type !== "command" ||
@@ -22,9 +24,11 @@ const handler = async (event: any) => {
             ["upload", "--agent", "openclaw"],
             {
                 stdio: ["pipe", "ignore", "ignore"],
+                timeout: TIMEOUT_MS,
             },
         );
         child.on("error", () => {}); // swallow a missing binary
+        child.stdin.on("error", () => {}); // swallow EPIPE if the child is gone
         child.stdin.end(JSON.stringify(items));
     } catch {
         // ignore

@@ -16,6 +16,8 @@ NOT_INSTALLED = (
     "config` to set the server URL and token."
 )
 
+TIMEOUT = 10  # seconds
+
 
 def emit(message: str) -> None:
     print(json.dumps({"systemMessage": message}))
@@ -27,9 +29,13 @@ def main() -> None:
             ["memoryhub-mcp", "config", "--check"],
             capture_output=True,
             check=False,
+            timeout=TIMEOUT,
         )
     except FileNotFoundError:
         emit(NOT_INSTALLED)
+        return
+    except subprocess.TimeoutExpired:
+        # Couldn't verify in time; stay silent rather than nag with a false negative.
         return
 
     if result.returncode != 0:
@@ -38,3 +44,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+    sys.exit(0)

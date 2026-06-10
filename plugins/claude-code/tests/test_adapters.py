@@ -1,3 +1,4 @@
+import io
 import json
 import sys
 from pathlib import Path
@@ -81,3 +82,44 @@ def test_check_config_reports_missing_binary(monkeypatch, capsys):
     _run_main()
     out = json.loads(capsys.readouterr().out)
     assert out["systemMessage"] == check_config.NOT_INSTALLED
+
+
+def test_recall_passes_timeout_and_survives_timeout(monkeypatch, capsys):
+    captured = {}
+
+    def fake_run(*args, **kwargs):
+        captured.update(kwargs)
+        raise recall.subprocess.TimeoutExpired(
+            cmd="memoryhub-mcp", timeout=kwargs.get("timeout")
+        )
+
+    monkeypatch.setattr(recall.subprocess, "run", fake_run)
+    recall.main()  # a hung server must not raise or hang the session
+    assert "timeout" in captured, "recall must bound subprocess.run with a timeout"
+    assert capsys.readouterr().out == ""  # fail-open: inject nothing
+
+
+def test_capture_passes_timeout_and_survives_timeout(monkeypatch, capsys):
+    mem = str(Path.home() / ".claude" / "projects" / "h" / "memory" / "a.md")
+    payload = {"tool_calls": [{"tool_name": "Write", "tool_input": {"file_path": mem}}]}
+    monkeypatch.setattr(capture.sys, "stdin", io.StringIO(json.dumps(payload)))
+
+    def fake_run(*args, **kwargs):
+        assert "timeout" in kwargs, "capture must bound subprocess.run with a timeout"
+        raise capture.subprocess.TimeoutExpired(cmd="x", timeout=kwargs.get("timeout"))
+
+    monkeypatch.setattr(capture.subprocess, "run", fake_run)
+    capture.main()  # must not raise
+    assert capsys.readouterr().out == ""  # stdout may be injected, so keep it clean
+
+
+def test_check_config_passes_timeout_and_survives_timeout(monkeypatch, capsys):
+    def fake_run(*args, **kwargs):
+        assert "timeout" in kwargs, "check_config must bound subprocess.run with a timeout"
+        raise check_config.subprocess.TimeoutExpired(
+            cmd="x", timeout=kwargs.get("timeout")
+        )
+
+    monkeypatch.setattr(check_config.subprocess, "run", fake_run)
+    _run_main()  # must not raise
+    assert capsys.readouterr().out == ""  # don't nag on a timeout

@@ -42,3 +42,43 @@ def test_check_config_emit_shapes_system_message(capsys):
     check_config.emit("hello")
     out = capsys.readouterr().out
     assert json.loads(out) == {"systemMessage": "hello"}
+
+
+def test_recall_passes_timeout_and_survives_timeout(monkeypatch, capsys):
+    captured = {}
+
+    def fake_run(*args, **kwargs):
+        captured.update(kwargs)
+        raise recall.subprocess.TimeoutExpired(
+            cmd="memoryhub-mcp", timeout=kwargs.get("timeout")
+        )
+
+    monkeypatch.setattr(recall.subprocess, "run", fake_run)
+    recall.main()  # a hung server must not raise or hang the session
+    assert "timeout" in captured, "recall must bound subprocess.run with a timeout"
+    assert capsys.readouterr().out == ""
+
+
+def test_capture_passes_timeout_and_survives_timeout(monkeypatch, capsys, tmp_path):
+    (tmp_path / "note.md").write_text("raw entry")
+    monkeypatch.setattr(capture, "memories_dir", lambda: tmp_path)
+
+    def fake_run(*args, **kwargs):
+        assert "timeout" in kwargs, "capture must bound subprocess.run with a timeout"
+        raise capture.subprocess.TimeoutExpired(cmd="x", timeout=kwargs.get("timeout"))
+
+    monkeypatch.setattr(capture.subprocess, "run", fake_run)
+    capture.main()  # must not raise
+    assert capsys.readouterr().out == ""
+
+
+def test_check_config_passes_timeout_and_survives_timeout(monkeypatch, capsys):
+    def fake_run(*args, **kwargs):
+        assert "timeout" in kwargs, "check_config must bound subprocess.run with a timeout"
+        raise check_config.subprocess.TimeoutExpired(
+            cmd="x", timeout=kwargs.get("timeout")
+        )
+
+    monkeypatch.setattr(check_config.subprocess, "run", fake_run)
+    check_config.main()  # must not raise
+    assert capsys.readouterr().out == ""

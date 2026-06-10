@@ -69,10 +69,10 @@ SQLite-based metadata, vector, and keyword index over four logical stores:
 
 - **files** — one row per indexed file (path, source `raw`/`synthesized`, size, updated-at) for change detection.
 - **chunks** — text chunks with 1-indexed `start_line`/`end_line`, model, and text. Chunk id is `{path}#{chunk_index}` (0-based). Insert deletes all of a path's existing chunks first and re-inserts, so chunk ids need not be stable.
-- **chunks_fts** — FTS5 virtual table over chunk text (unicode61 tokenizer) for BM25 keyword search.
+- **chunks_fts** — FTS5 virtual table over chunk text (unicode61 tokenizer) for BM25 keyword search. Maintained by triggers on `chunks`, but **not yet read by search** (see below).
 - **chunks_vec** — sqlite-vec virtual table holding the embeddings; created lazily at the embedding dimension read from the first response. The dimension is persisted in a small key/value `meta` table so the vector table can be reconstructed on reopen; a mismatched dimension on insert is an error.
 
-Search is hybrid (sqlite-vec cosine + FTS5 BM25), returning `path`, `start_line`, `end_line`, `score`, `snippet`. The request's `scope` selects a path-prefix filter — `all` (no prefix; the whole store), `user` (`{username}/%`), or `agent` (`{username}/{agent_id}/%`) — and `raw_only` adds `files.source = 'raw'` (the `files` table is joined in) to exclude the synthesized tiers. By default (`all`, `raw_only=false`) a search spans every user's raw memories and every summary tier, including the global summary. Chunking is ~400 tokens with 80-token overlap.
+Search is **currently vector-only** (sqlite-vec cosine; `score = 1 - distance/2`, mapping cosine distance `[0,2]` to `[0,1]`), returning `path`, `start_line`, `end_line`, `score`, `snippet`. Hybrid retrieval (fusing FTS5 BM25 keyword matches with the vector results) is planned but not yet wired up — `chunks_fts` is kept in sync so it can be added without a reindex. Because sqlite-vec applies its `k` limit before the scope/`raw_only` filters, scoped searches over-fetch candidates from the KNN and then truncate to the requested limit. The request's `scope` selects a path-prefix filter — `all` (no prefix; the whole store), `user` (`{username}/%`), or `agent` (`{username}/{agent_id}/%`) — and `raw_only` adds `files.source = 'raw'` (the `files` table is joined in) to exclude the synthesized tiers. By default (`all`, `raw_only=false`) a search spans every user's raw memories and every summary tier, including the global summary. Chunking is ~400 tokens with 80-token overlap.
 
 ## Errors
 

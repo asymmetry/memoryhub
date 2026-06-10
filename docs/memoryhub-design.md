@@ -30,7 +30,7 @@ Single Rust binary built on the `acktor` actor framework (Tokio). The top-level 
 
 - **Actor model (acktor).** Each sub-system is an actor with its own mailbox and no shared mutable state, isolating failure domains and making supervision the single lifecycle mechanism.
 - **Embed on save.** Every memory is embedded and indexed when written, so it is immediately searchable — no "unprocessed" state to reconcile later.
-- **Hybrid search.** Vector similarity (sqlite-vec) combined with BM25 keyword matching (FTS5), robust to both semantic and literal queries.
+- **Vector search (hybrid planned).** Semantic retrieval via sqlite-vec cosine similarity. The FTS5 keyword index is maintained alongside it so BM25 fusion can be added later, but search is vector-only today.
 - **Plain Markdown on disk; metadata in SQLite.** Files carry no frontmatter; the index can be rebuilt without rewriting memories.
 - **Synthesis split from embedding.** Separated end-to-end so a deployment can pair a chat-only vendor (e.g. DeepSeek) with a different embeddings vendor (e.g. OpenAI).
 

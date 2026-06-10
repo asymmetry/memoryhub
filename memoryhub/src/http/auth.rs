@@ -100,6 +100,31 @@ fn sha256_hex(secret: &str) -> String {
         .collect()
 }
 
+/// Rejects usernames that could escape their storage namespace or act as SQL `LIKE` wildcards.
+///
+/// A username becomes a path segment (`{username}/{agent_id}/...`) and a search scope prefix, so
+/// only ASCII letters, digits, `-` and `_` are allowed.
+fn validate_username(username: &str) -> Result<(), AuthError> {
+    if username.is_empty() {
+        return Err(AuthError::InvalidUsername("must not be empty".into()));
+    }
+    if username == "_synthesized" {
+        return Err(AuthError::InvalidUsername(
+            "'_synthesized' is reserved".into(),
+        ));
+    }
+    if !username
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        return Err(AuthError::InvalidUsername(format!(
+            "{} contains characters outside [A-Za-z0-9_-]",
+            username
+        )));
+    }
+    Ok(())
+}
+
 /// Generates a new token secret: `mh_` + base64url(32 random bytes, no padding).
 fn generate_secret() -> String {
     let bytes: [u8; 32] = rand::rng().random();
@@ -170,6 +195,7 @@ impl AuthStore {
     }
 
     pub async fn create_user(&self, username: &str, role: &str) -> Result<UserInfo, AuthError> {
+        validate_username(username)?;
         let conn = Arc::clone(&self.conn);
         let username = username.to_string();
         let role = role.to_string();
@@ -396,6 +422,40 @@ mod tests {
         let users = s.list_users().await.unwrap();
         assert_eq!(users.len(), 1);
         assert_eq!(users[0].username, "alice");
+    }
+
+    #[tokio::test]
+    async fn create_user_rejects_unsafe_usernames() {
+        let s = store();
+        // Path separators / traversal, empty, whitespace, LIKE wildcards, and the
+        // reserved synthesized folder name must all be rejected.
+        for bad in [
+            "",
+            "../etc",
+            "a/b",
+            "a\\b",
+            "..",
+            "a b",
+            "a.b",
+            "a%b",
+            "a_b%",
+            "_synthesized",
+        ] {
+            let err = s.create_user(bad, "user").await.unwrap_err();
+            assert!(
+                matches!(err, AuthError::InvalidUsername(_)),
+                "expected InvalidUsername for {bad:?}, got {err:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn create_user_accepts_safe_usernames() {
+        let s = store();
+        for ok in ["alice", "bob-1", "john_doe", "A1"] {
+            let info = s.create_user(ok, "user").await.unwrap();
+            assert_eq!(info.username, ok);
+        }
     }
 
     #[tokio::test]

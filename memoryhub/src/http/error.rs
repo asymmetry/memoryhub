@@ -36,6 +36,9 @@ pub enum HttpServerError {
 /// Errors from the [`AuthStore`][super::AuthStore].
 #[derive(Debug, Error)]
 pub enum AuthError {
+    #[error("invalid username: {0}")]
+    InvalidUsername(String),
+
     #[error("user already exists")]
     UserExists,
 
@@ -67,6 +70,9 @@ pub enum HttpError {
     #[error("conflict")]
     Conflict,
 
+    #[error("bad request: {0}")]
+    BadRequest(String),
+
     #[error("internal error: {0}")]
     Internal(String),
 
@@ -80,6 +86,7 @@ pub enum HttpError {
 impl From<AuthError> for HttpError {
     fn from(e: AuthError) -> Self {
         match e {
+            AuthError::InvalidUsername(msg) => HttpError::BadRequest(msg),
             AuthError::UserExists => HttpError::Conflict,
             AuthError::UserNotFound | AuthError::TokenNotFound => HttpError::NotFound,
             AuthError::Db(_) | AuthError::Join(_) => HttpError::Internal(e.report()),
@@ -101,6 +108,9 @@ impl IntoResponse for HttpError {
             HttpError::Unauthorized => (StatusCode::UNAUTHORIZED, "unauthorized", None),
             HttpError::Forbidden => (StatusCode::FORBIDDEN, "forbidden", None),
             HttpError::Conflict => (StatusCode::CONFLICT, "conflict", None),
+            HttpError::BadRequest(msg) => {
+                (StatusCode::BAD_REQUEST, "bad_request", Some(msg.clone()))
+            }
             HttpError::Internal(msg) => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "internal",
@@ -183,6 +193,15 @@ mod tests {
         let (status, body) = body_string(err.into_response()).await;
         assert_eq!(status, StatusCode::CONFLICT);
         assert_eq!(body, r#"{"error":"conflict"}"#);
+    }
+
+    #[tokio::test]
+    async fn auth_invalid_username_maps_to_400() {
+        let err: HttpError = AuthError::InvalidUsername("a/b".into()).into();
+        let (status, body) = body_string(err.into_response()).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(body.contains(r#""error":"bad_request""#));
+        assert!(body.contains("a/b"));
     }
 
     #[tokio::test]

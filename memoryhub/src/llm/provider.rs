@@ -45,10 +45,12 @@ pub struct ChatResponse {
 
 /// Abstract chat provider. Implementations are plain async types (no actor).
 pub trait Provider: Send + Sync + 'static {
-    /// Short provider identifier, e.g. `"deepseek"`. Used to resolve provider-specific prompt
-    /// templates.
+    /// Returns a short provider identifier.
+    ///
+    /// Used to resolve provider-specific prompt templates.
     fn name(&self) -> &str;
 
+    /// Sends `messages` to the provider and returns the response.
     fn chat<'a>(
         &'a self,
         messages: &'a [ChatMessage],
@@ -58,6 +60,7 @@ pub trait Provider: Send + Sync + 'static {
 /// Abstract embedding provider. Kept separate from [`Provider`] because not every chat vendor
 /// exposes an embeddings endpoint.
 pub trait EmbeddingProvider: Send + Sync + 'static {
+    /// Embeds `texts`, returning exactly one embedding per input in the **same order**.
     fn embed<'a>(
         &'a self,
         texts: &'a [String],

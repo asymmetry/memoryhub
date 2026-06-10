@@ -136,7 +136,7 @@ fn create_vec_table(conn: &Connection, dim: usize) -> Result<(), IndexError> {
     let ddl = format!(
         "CREATE VIRTUAL TABLE IF NOT EXISTS chunks_vec USING vec0(
             chunk_id TEXT PRIMARY KEY,
-            embedding float[{dim}]
+            embedding float[{dim}] distance_metric=cosine
         )"
     );
     conn.execute_batch(&ddl)?;
@@ -275,11 +275,31 @@ fn do_delete(conn: &Connection, path: &str) -> Result<(), IndexError> {
     Ok(())
 }
 
+/// Escapes the SQL `LIKE` wildcards (`\`, `%`, `_`) so a username containing them can't widen
+/// the scope prefix and match another user's path. Paired with an `ESCAPE '\'` clause.
+fn like_escape(s: &str) -> String {
+    s.replace('\\', "\\\\")
+        .replace('%', "\\%")
+        .replace('_', "\\_")
+}
+
+/// How many extra candidates to pull from the KNN per requested result when a search is scoped.
+///
+/// `sqlite-vec` applies its `k` limit *before* our scope filter, so without over-fetching a
+/// scoped search can return fewer than `limit` results when the globally-nearest chunks all
+/// belong to other users.
+const SCOPE_OVERFETCH: usize = 10;
+
 fn do_search(conn: &Connection, msg: &IndexSearch) -> Result<Vec<SearchResult>, IndexError> {
     let path_prefix = match msg.scope {
         SearchScope::All => "%".to_string(),
-        SearchScope::User => format!("{}/%", msg.username),
-        SearchScope::Agent => format!("{}/{}/%", msg.username, msg.agent_id),
+        SearchScope::User => format!("{}/%", like_escape(&msg.username)),
+        SearchScope::Agent => format!("{}/{}/%", like_escape(&msg.username), msg.agent_id),
+    };
+    // `All` needs no filtering, so `limit` candidates suffice; scoped searches over-fetch.
+    let fetch_k = match msg.scope {
+        SearchScope::All => msg.limit,
+        SearchScope::User | SearchScope::Agent => msg.limit.saturating_mul(SCOPE_OVERFETCH),
     };
     let source_clause = if msg.raw_only {
         " AND f.source = 'raw'"
@@ -291,7 +311,7 @@ fn do_search(conn: &Connection, msg: &IndexSearch) -> Result<Vec<SearchResult>, 
          FROM chunks_vec cv
          JOIN chunks c ON c.id = cv.chunk_id
          JOIN files f ON f.path = c.path
-         WHERE cv.embedding MATCH ?1 AND k = ?2 AND c.path LIKE ?3{source_clause}
+         WHERE cv.embedding MATCH ?1 AND k = ?2 AND c.path LIKE ?3 ESCAPE '\\'{source_clause}
          ORDER BY cv.distance ASC"
     );
 
@@ -299,25 +319,36 @@ fn do_search(conn: &Connection, msg: &IndexSearch) -> Result<Vec<SearchResult>, 
     for emb in &msg.embeddings {
         let blob = vec_to_blob(&emb.0);
         let mut stmt = conn.prepare(&sql)?;
-        let rows = stmt.query_map(params![blob, msg.limit as i64, path_prefix], |row| {
-            Ok(SearchResult {
-                path: row.get(2)?,
-                start_line: row.get(3)?,
-                end_line: row.get(4)?,
-                score: {
-                    let distance: f32 = row.get(1)?;
-                    1.0 - distance
-                },
-                snippet: row.get(5)?,
-            })
+        let rows = stmt.query_map(params![blob, fetch_k as i64, path_prefix], |row| {
+            // A degenerate stored vector (e.g. all-zeros) has an undefined cosine distance,
+            // which sqlite-vec returns as NULL. Drop such rows rather than failing the whole
+            // search.
+            let distance: Option<f32> = row.get(1)?;
+            let path: String = row.get(2)?;
+            let start_line = row.get(3)?;
+            let end_line = row.get(4)?;
+            let snippet: String = row.get(5)?;
+            Ok(distance.map(|distance| SearchResult {
+                path,
+                start_line,
+                end_line,
+                // Cosine distance is in [0, 2] (0 = identical direction); map to a [0, 1]
+                // similarity score where 1.0 is most similar.
+                score: 1.0 - distance / 2.0,
+                snippet,
+            }))
         })?;
         for row in rows {
-            all_results.push(row?);
+            if let Some(result) = row? {
+                all_results.push(result);
+            }
         }
     }
 
-    all_results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap());
+    // `total_cmp` orders deterministically without panicking even on a NaN score.
+    all_results.sort_by(|a, b| b.score.total_cmp(&a.score));
     all_results.truncate(msg.limit);
+
     Ok(all_results)
 }
 
@@ -431,7 +462,7 @@ mod tests {
                 text: "Rust programming language".to_string(),
                 start_line: 1,
                 end_line: 5,
-                embedding: Embedding(vec![0.0; 128]),
+                embedding: Embedding(vec![1.0; 128]),
             }],
         })
         .await
@@ -442,7 +473,7 @@ mod tests {
 
         let results = addr
             .send(IndexSearch {
-                embeddings: vec![Embedding(vec![0.0; 128])],
+                embeddings: vec![Embedding(vec![1.0; 128])],
                 username: "alice".to_string(),
                 agent_id: Uuid::parse_str("00000000-0000-0000-0000-000000000001").unwrap(),
                 scope: super::super::message::SearchScope::User,
@@ -457,6 +488,260 @@ mod tests {
 
         assert!(!results.is_empty());
         assert_eq!(results[0].path, "alice/agent1/daily_note/2026-03-31.md");
+    }
+
+    #[tokio::test]
+    async fn user_scope_does_not_leak_across_underscore_usernames() {
+        // Usernames `a_b` and `axb` are both valid, but a `_` in a LIKE pattern is a
+        // single-char wildcard, so an unescaped `a_b/%` would also match `axb/...`.
+        let index = test_index();
+        let (addr, _handle) = index.start("index-test").unwrap();
+
+        addr.send(EnsureVecReady { dim: 4 })
+            .await
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap();
+
+        for owner in ["a_b", "axb"] {
+            addr.send(IndexInsert {
+                path: format!("{owner}/agent1/note.md"),
+                source: "raw".to_string(),
+                size: 10,
+                model: "mock".to_string(),
+                chunks: vec![Chunk {
+                    text: format!("note for {owner}"),
+                    start_line: 1,
+                    end_line: 1,
+                    embedding: Embedding(vec![1.0; 4]),
+                }],
+            })
+            .await
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap();
+        }
+
+        let results = addr
+            .send(IndexSearch {
+                embeddings: vec![Embedding(vec![1.0; 4])],
+                username: "a_b".to_string(),
+                agent_id: Uuid::parse_str("00000000-0000-0000-0000-000000000001").unwrap(),
+                scope: super::super::message::SearchScope::User,
+                raw_only: false,
+                limit: 10,
+            })
+            .await
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert!(!results.is_empty(), "a_b's own note should be found");
+        assert!(
+            results.iter().all(|r| r.path.starts_with("a_b/")),
+            "search scoped to a_b leaked another user's memory: {:?}",
+            results.iter().map(|r| &r.path).collect::<Vec<_>>()
+        );
+    }
+
+    #[tokio::test]
+    async fn scoped_search_overfetches_past_closer_out_of_scope_chunks() {
+        // The k nearest chunks globally can all be out of scope; if the KNN only fetches
+        // `limit` rows, the scope filter then leaves nothing even though in-scope matches exist.
+        let index = test_index();
+        let (addr, _handle) = index.start("index-test").unwrap();
+
+        addr.send(EnsureVecReady { dim: 2 })
+            .await
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap();
+
+        // Three "other" chunks sit exactly on the query vector (closest of all).
+        for i in 0..3 {
+            addr.send(IndexInsert {
+                path: format!("other/agent1/n{i}.md"),
+                source: "raw".to_string(),
+                size: 10,
+                model: "mock".to_string(),
+                chunks: vec![Chunk {
+                    text: format!("other {i}"),
+                    start_line: 1,
+                    end_line: 1,
+                    embedding: Embedding(vec![1.0, 0.0]),
+                }],
+            })
+            .await
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap();
+        }
+        // Two "alice" chunks point elsewhere, so they rank below every "other" chunk.
+        for i in 0..2 {
+            addr.send(IndexInsert {
+                path: format!("alice/agent1/n{i}.md"),
+                source: "raw".to_string(),
+                size: 10,
+                model: "mock".to_string(),
+                chunks: vec![Chunk {
+                    text: format!("alice {i}"),
+                    start_line: 1,
+                    end_line: 1,
+                    embedding: Embedding(vec![0.0, 1.0]),
+                }],
+            })
+            .await
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap();
+        }
+
+        let results = addr
+            .send(IndexSearch {
+                embeddings: vec![Embedding(vec![1.0, 0.0])],
+                username: "alice".to_string(),
+                agent_id: Uuid::parse_str("00000000-0000-0000-0000-000000000001").unwrap(),
+                scope: super::super::message::SearchScope::User,
+                raw_only: false,
+                limit: 2,
+            })
+            .await
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(
+            results.len(),
+            2,
+            "alice's two chunks should be found despite closer out-of-scope chunks, got {:?}",
+            results.iter().map(|r| &r.path).collect::<Vec<_>>()
+        );
+        assert!(results.iter().all(|r| r.path.starts_with("alice/")));
+    }
+
+    #[tokio::test]
+    async fn search_scores_cosine_similarity() {
+        let index = test_index();
+        let (addr, _handle) = index.start("index-test").unwrap();
+
+        addr.send(EnsureVecReady { dim: 2 })
+            .await
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap();
+
+        // One chunk points the same way as the query; one is orthogonal.
+        for (name, emb) in [("same", vec![1.0, 0.0]), ("orth", vec![0.0, 1.0])] {
+            addr.send(IndexInsert {
+                path: format!("alice/agent1/{name}.md"),
+                source: "raw".to_string(),
+                size: 10,
+                model: "mock".to_string(),
+                chunks: vec![Chunk {
+                    text: name.to_string(),
+                    start_line: 1,
+                    end_line: 1,
+                    embedding: Embedding(emb),
+                }],
+            })
+            .await
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap();
+        }
+
+        let results = addr
+            .send(IndexSearch {
+                embeddings: vec![Embedding(vec![1.0, 0.0])],
+                username: "alice".to_string(),
+                agent_id: Uuid::parse_str("00000000-0000-0000-0000-000000000001").unwrap(),
+                scope: super::super::message::SearchScope::User,
+                raw_only: false,
+                limit: 10,
+            })
+            .await
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap();
+
+        // Identical direction -> cosine distance 0 -> score 1.0; orthogonal -> distance 1 -> 0.5.
+        assert_eq!(results[0].path, "alice/agent1/same.md");
+        assert!(
+            (results[0].score - 1.0).abs() < 1e-5,
+            "identical-direction score should be ~1.0, got {}",
+            results[0].score
+        );
+        let orth = results
+            .iter()
+            .find(|r| r.path.ends_with("orth.md"))
+            .unwrap();
+        assert!(
+            (orth.score - 0.5).abs() < 1e-5,
+            "orthogonal cosine score should be ~0.5, got {}",
+            orth.score
+        );
+    }
+
+    #[tokio::test]
+    async fn search_tolerates_degenerate_zero_vector() {
+        // A stored zero vector has undefined cosine distance (NaN); the score sort must not panic.
+        let index = test_index();
+        let (addr, _handle) = index.start("index-test").unwrap();
+
+        addr.send(EnsureVecReady { dim: 2 })
+            .await
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap();
+
+        for (name, emb) in [("good", vec![1.0, 0.0]), ("zero", vec![0.0, 0.0])] {
+            addr.send(IndexInsert {
+                path: format!("alice/agent1/{name}.md"),
+                source: "raw".to_string(),
+                size: 10,
+                model: "mock".to_string(),
+                chunks: vec![Chunk {
+                    text: name.to_string(),
+                    start_line: 1,
+                    end_line: 1,
+                    embedding: Embedding(emb),
+                }],
+            })
+            .await
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap();
+        }
+
+        let results = addr
+            .send(IndexSearch {
+                embeddings: vec![Embedding(vec![1.0, 0.0])],
+                username: "alice".to_string(),
+                agent_id: Uuid::parse_str("00000000-0000-0000-0000-000000000001").unwrap(),
+                scope: super::super::message::SearchScope::User,
+                raw_only: false,
+                limit: 10,
+            })
+            .await
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap();
+
+        // Must return without panicking; the well-defined match is present.
+        assert!(results.iter().any(|r| r.path.ends_with("good.md")));
     }
 
     #[tokio::test]
@@ -480,7 +765,7 @@ mod tests {
                 text: "to be deleted".to_string(),
                 start_line: 1,
                 end_line: 1,
-                embedding: Embedding(vec![0.0; 128]),
+                embedding: Embedding(vec![1.0; 128]),
             }],
         })
         .await
@@ -500,7 +785,7 @@ mod tests {
 
         let results = addr
             .send(IndexSearch {
-                embeddings: vec![Embedding(vec![0.0; 128])],
+                embeddings: vec![Embedding(vec![1.0; 128])],
                 username: "alice".to_string(),
                 agent_id: Uuid::parse_str("00000000-0000-0000-0000-000000000001").unwrap(),
                 scope: super::super::message::SearchScope::User,
@@ -539,7 +824,7 @@ mod tests {
                 text: "version one".to_string(),
                 start_line: 1,
                 end_line: 1,
-                embedding: Embedding(vec![0.0; 128]),
+                embedding: Embedding(vec![1.0; 128]),
             }],
         })
         .await
@@ -557,7 +842,7 @@ mod tests {
                 text: "version two".to_string(),
                 start_line: 1,
                 end_line: 1,
-                embedding: Embedding(vec![0.0; 128]),
+                embedding: Embedding(vec![1.0; 128]),
             }],
         })
         .await
@@ -568,7 +853,7 @@ mod tests {
 
         let results = addr
             .send(IndexSearch {
-                embeddings: vec![Embedding(vec![0.0; 128])],
+                embeddings: vec![Embedding(vec![1.0; 128])],
                 username: "alice".to_string(),
                 agent_id: Uuid::parse_str("00000000-0000-0000-0000-000000000001").unwrap(),
                 scope: super::super::message::SearchScope::User,
@@ -623,7 +908,7 @@ mod tests {
                     text: "shared topic".to_string(),
                     start_line: 1,
                     end_line: 1,
-                    embedding: Embedding(vec![0.0; 128]),
+                    embedding: Embedding(vec![1.0; 128]),
                 }],
             })
             .await
@@ -644,7 +929,7 @@ mod tests {
         raw_only: bool,
     ) -> Vec<SearchResult> {
         addr.send(IndexSearch {
-            embeddings: vec![Embedding(vec![0.0; 128])],
+            embeddings: vec![Embedding(vec![1.0; 128])],
             username: "alice".to_string(),
             agent_id: alice(),
             scope,

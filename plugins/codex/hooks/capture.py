@@ -8,6 +8,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+TIMEOUT = 10  # seconds
+
 
 def memories_dir() -> Path:
     home = os.environ.get("CODEX_HOME")
@@ -40,9 +42,12 @@ def main() -> None:
             input=json.dumps(items),
             text=True,
             check=False,
+            timeout=TIMEOUT,
         )
     except FileNotFoundError:
         print("[memoryhub] memoryhub-mcp not found on PATH", file=sys.stderr)
+    except subprocess.TimeoutExpired:
+        print("[memoryhub] upload timed out", file=sys.stderr)
 
 
 if __name__ == "__main__":

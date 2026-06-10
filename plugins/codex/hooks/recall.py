@@ -6,6 +6,8 @@ import json
 import subprocess
 import sys
 
+TIMEOUT = 10  # seconds
+
 
 def format_context(summary: str) -> dict | None:
     summary = summary.strip()
@@ -26,9 +28,10 @@ def main() -> None:
             capture_output=True,
             text=True,
             check=False,
+            timeout=TIMEOUT,
         )
         summary = result.stdout
-    except FileNotFoundError:
+    except (FileNotFoundError, subprocess.TimeoutExpired):
         return
 
     out = format_context(summary)

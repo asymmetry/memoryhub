@@ -4,6 +4,8 @@ import { promisify } from "node:util";
 const execFileAsync = promisify(execFile);
 const MEMORY_FILE = "MEMORY.md"; // OpenClaw's DEFAULT_MEMORY_FILENAME
 
+const TIMEOUT_MS = 10_000;
+
 const handler = async (event: any) => {
     if (event.type !== "agent" || event.action !== "bootstrap") return;
     const files = event.context?.bootstrapFiles;
@@ -11,13 +13,11 @@ const handler = async (event: any) => {
 
     let summary = "";
     try {
-        const { stdout } = await execFileAsync("memoryhub-mcp", [
-            "recall",
-            "--agent",
-            "openclaw",
-            "--scope",
-            "global",
-        ]);
+        const { stdout } = await execFileAsync(
+            "memoryhub-mcp",
+            ["recall", "--agent", "openclaw", "--scope", "global"],
+            { timeout: TIMEOUT_MS },
+        );
         summary = (stdout ?? "").trim();
     } catch {
         return; // binary missing or recall failed -> inject nothing

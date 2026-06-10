@@ -10,6 +10,8 @@ from pathlib import Path
 PROJECTS_DIR = Path.home() / ".claude" / "projects"
 WRITE_TOOLS = {"Write", "Edit", "MultiEdit"}
 
+TIMEOUT = 10  # seconds
+
 
 def is_memory_path(path: Path) -> bool:
     try:
@@ -61,9 +63,12 @@ def main() -> None:
             input=json.dumps(items),
             text=True,
             check=False,
+            timeout=TIMEOUT,
         )
     except FileNotFoundError:
         print("[memoryhub] memoryhub-mcp not found on PATH", file=sys.stderr)
+    except subprocess.TimeoutExpired:
+        print("[memoryhub] upload timed out", file=sys.stderr)
 
 
 if __name__ == "__main__":

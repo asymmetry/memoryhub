@@ -130,14 +130,30 @@ where
                 let jitter = rand::rng().random::<f64>();
                 let delay = Duration::from_millis((base_ms as f64 * (0.5 + 0.5 * jitter)) as u64);
                 warn!(
+                    "transient LLM error on attempt {}, retrying in {} ms: {}",
                     attempt,
-                    "transient LLM error, retrying in {:?}: {}", delay, msg
+                    delay.as_millis(),
+                    msg
                 );
                 time::sleep(delay).await;
             }
             Err(e) => return Err(e),
         }
     }
+}
+
+/// Finds the closest x not exceeding index where is_char_boundary(x) is true.
+///
+/// FIXME: use [`str::floor_char_boundary`] once MSRV >= 1.91.
+pub(crate) fn floor_char_boundary(s: &str, index: usize) -> usize {
+    if index >= s.len() {
+        return s.len();
+    }
+    let mut boundary = index;
+    while !s.is_char_boundary(boundary) {
+        boundary -= 1;
+    }
+    boundary
 }
 
 #[cfg(test)]
@@ -196,6 +212,21 @@ mod tests {
 
         assert!(matches!(err, LlmError::Transient(_)));
         assert_eq!(mock.chat_call_count(), 3);
+    }
+
+    #[test]
+    fn floor_char_boundary_clamps_and_never_splits() {
+        // 3-byte chars: only byte indices 0, 3, 6, 9 are char boundaries.
+        let s = "界界界"; // 9 bytes
+        assert_eq!(floor_char_boundary(s, 0), 0);
+        assert_eq!(floor_char_boundary(s, 2), 0);
+        assert_eq!(floor_char_boundary(s, 3), 3);
+        assert_eq!(floor_char_boundary(s, 5), 3);
+        assert_eq!(floor_char_boundary(s, 6), 6);
+        // Past the end clamps to len.
+        assert_eq!(floor_char_boundary(s, 100), s.len());
+        // The result is always a valid slice index.
+        assert_eq!(&s[..floor_char_boundary(s, 5)], "界");
     }
 
     #[test]

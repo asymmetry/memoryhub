@@ -9,7 +9,7 @@
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
-use acktor::{Actor, Context, Handler};
+use acktor::{Actor, Context, Handler, utils::debug_trace};
 use chrono::Utc;
 use rusqlite::{Connection, params};
 
@@ -369,6 +369,8 @@ impl Handler<EnsureVecReady> for Indexer {
         msg: EnsureVecReady,
         _ctx: &mut Self::Context,
     ) -> Result<(), IndexError> {
+        debug_trace!("Handle command {:?}", msg);
+
         let conn = Arc::clone(&self.conn);
         tokio::task::spawn_blocking(move || {
             let conn = conn.lock().unwrap();
@@ -386,6 +388,8 @@ impl Handler<IndexInsert> for Indexer {
         msg: IndexInsert,
         _ctx: &mut Self::Context,
     ) -> Result<(), IndexError> {
+        debug_trace!("Handle command {:?}", msg);
+
         let conn = Arc::clone(&self.conn);
         tokio::task::spawn_blocking(move || {
             let conn = conn.lock().unwrap();
@@ -403,6 +407,8 @@ impl Handler<IndexDelete> for Indexer {
         msg: IndexDelete,
         _ctx: &mut Self::Context,
     ) -> Result<(), IndexError> {
+        debug_trace!("Handle command {:?}", msg);
+
         let conn = Arc::clone(&self.conn);
         tokio::task::spawn_blocking(move || {
             let conn = conn.lock().unwrap();
@@ -420,6 +426,8 @@ impl Handler<IndexSearch> for Indexer {
         msg: IndexSearch,
         _ctx: &mut Self::Context,
     ) -> Result<Vec<SearchResult>, IndexError> {
+        debug_trace!("Handle command {:?}", msg);
+
         let conn = Arc::clone(&self.conn);
         tokio::task::spawn_blocking(move || {
             let conn = conn.lock().unwrap();

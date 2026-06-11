@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use tracing::debug;
 
 use super::super::{config::LlmConfig, error::LlmError};
-use super::{ChatMessage, ChatResponse, Provider, Role};
+use super::{ChatMessage, ChatResponse, Provider, Role, floor_char_boundary};
 
 pub struct DeepSeekProvider {
     http: Client,
@@ -86,11 +86,7 @@ async fn map_status(resp: reqwest::Response) -> Result<reqwest::Response, LlmErr
         return Ok(resp);
     }
     let body = resp.text().await.unwrap_or_default();
-    let excerpt = if body.len() > 512 {
-        &body[..512]
-    } else {
-        &body
-    };
+    let excerpt = &body[..floor_char_boundary(&body, 512)];
     if status.is_server_error() || status == StatusCode::TOO_MANY_REQUESTS {
         Err(LlmError::Transient(format!("{}: {}", status, excerpt)))
     } else {
@@ -250,6 +246,29 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, LlmError::Provider(_)));
+    }
+
+    #[tokio::test]
+    async fn long_multibyte_error_body_does_not_panic() {
+        let server = MockServer::start().await;
+        // 3-byte chars, longer than the 512-char excerpt: a byte slice at index 512
+        // would split a codepoint and panic. Char-based truncation must not.
+        let body = "界".repeat(600);
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(ResponseTemplate::new(500).set_body_string(body))
+            .mount(&server)
+            .await;
+
+        let p = DeepSeekProvider::new(&config_for(&server)).unwrap();
+        let err = p
+            .chat(&[ChatMessage {
+                role: Role::User,
+                content: "hi".into(),
+            }])
+            .await
+            .unwrap_err();
+        assert!(matches!(err, LlmError::Transient(_)));
     }
 
     #[tokio::test]

@@ -151,10 +151,9 @@ impl McpServer {
     }
 
     /// Resolves the `agent_id` once, from the override or the connecting client's name.
-    async fn agent_id(&self, ctx: &RequestContext<RoleServer>) -> Uuid {
-        *self
-            .agent_id
-            .get_or_init(|| async {
+    async fn agent_id(&self, ctx: &RequestContext<RoleServer>) -> Result<Uuid, McpError> {
+        self.agent_id
+            .get_or_try_init(|| async {
                 let client_name = ctx
                     .peer
                     .peer_info()
@@ -164,9 +163,12 @@ impl McpServer {
                     client_name.as_deref(),
                     &self.config_dir,
                 )
-                .unwrap_or_else(|_| Uuid::nil())
             })
             .await
+            .copied()
+            .map_err(|e| {
+                McpError::internal_error(format!("could not resolve agent id: {}", e), None)
+            })
     }
 
     #[tool(
@@ -178,7 +180,7 @@ impl McpServer {
         Parameters(args): Parameters<SearchArgs>,
         ctx: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, McpError> {
-        let agent_id = self.agent_id(&ctx).await;
+        let agent_id = self.agent_id(&ctx).await?;
         match do_search(
             &self.client,
             agent_id,
@@ -203,7 +205,7 @@ impl McpServer {
         Parameters(args): Parameters<WriteArgs>,
         ctx: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, McpError> {
-        let agent_id = self.agent_id(&ctx).await;
+        let agent_id = self.agent_id(&ctx).await?;
         match do_write(
             &self.client,
             agent_id,
@@ -228,7 +230,7 @@ impl McpServer {
         Parameters(args): Parameters<UploadArgs>,
         ctx: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, McpError> {
-        let agent_id = self.agent_id(&ctx).await;
+        let agent_id = self.agent_id(&ctx).await?;
         match do_upload(
             &self.client,
             agent_id,
@@ -252,7 +254,7 @@ impl McpServer {
         Parameters(args): Parameters<ReadArgs>,
         ctx: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, McpError> {
-        let agent_id = self.agent_id(&ctx).await;
+        let agent_id = self.agent_id(&ctx).await?;
         match do_read(
             &self.client,
             agent_id,

@@ -93,8 +93,12 @@ impl Actor for LlmService {
             warn!("Could not write default prompt templates: {}", e.report());
         }
 
-        let (embedder, handle) =
-            Embedder::new(embedding, self.config.max_retries).start("embedder")?;
+        let (embedder, handle) = Embedder::new(
+            embedding,
+            self.config.max_retries,
+            self.config.embedding_dim,
+        )
+        .start("embedder")?;
         self.embedder = Some(embedder);
         self.embedder_handle = Some(handle);
 

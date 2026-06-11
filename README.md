@@ -33,10 +33,8 @@ It's a single self-contained service.
 ## Quick start
 
 ```bash
-# Run the server. It binds 0.0.0.0:8000 by default; bind to localhost unless it
-# sits behind a TLS-terminating proxy. Pass a bootstrap admin token.
-MEMORYHUB_ADMIN_TOKEN=mh_root_secret \
-  cargo run -p memoryhub -- --host 127.0.0.1 --port 8000
+# Run the server. Pass a bootstrap admin token.
+MEMORYHUB_ADMIN_TOKEN=mh_root_secret cargo run -p memoryhub
 
 # Provision a user and mint a token. The bootstrap token is honored only until an
 # admin user exists, so use it to create users and their tokens first.
@@ -51,8 +49,7 @@ curl -sX POST http://127.0.0.1:8000/v1/admin/users/alice/tokens \
   -d '{"name":"laptop"}'
 # => {"id":"...","token":"mh_..."}   the token is shown only once; copy it.
 
-# Every /v1 route except /v1/health requires the token. Identity (username) comes
-# from the token, never the request body.
+# Every /v1 route except /v1/health requires the token.
 TOKEN=mh_...   # the token minted above
 
 # Write a memory (agent_id is a UUID)

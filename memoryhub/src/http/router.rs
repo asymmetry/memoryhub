@@ -1,11 +1,14 @@
+use std::time::Duration;
+
 use axum::{
     Json, Router,
     extract::State,
+    http::StatusCode,
     middleware::from_fn_with_state,
     routing::{delete, get, post},
 };
 use serde::{Deserialize, Serialize};
-use tower_http::trace::TraceLayer;
+use tower_http::{timeout::TimeoutLayer, trace::TraceLayer};
 use uuid::Uuid;
 
 use super::error::HttpError;
@@ -15,6 +18,12 @@ use crate::memory::message::{
     FileOpDelete, FileOpRead, FileOpWrite, GetSummary, Search, SearchResult, SearchScope,
     SummaryScope,
 };
+
+/// Hard cap on how long any single request may run before the connection is released.
+///
+/// Must exceed the synchronous embed budget on write/search (the LLM `request_timeout_secs` ×
+/// `max_retries`, ~90s with defaults).
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
 
 pub fn build_router(state: HttpServerState) -> Router {
     // Protected routes: everything under /v1 except /health. The middleware runs via
@@ -43,6 +52,10 @@ pub fn build_router(state: HttpServerState) -> Router {
     Router::new()
         .nest("/v1", v1)
         .layer(TraceLayer::new_for_http())
+        .layer(TimeoutLayer::with_status_code(
+            StatusCode::SERVICE_UNAVAILABLE,
+            REQUEST_TIMEOUT,
+        ))
         .with_state(state)
 }
 

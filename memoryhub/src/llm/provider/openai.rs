@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use tracing::debug;
 
 use super::super::{EmbedResult, Embedding, config::LlmConfig, error::LlmError};
-use super::{ChatMessage, ChatResponse, EmbeddingProvider, Provider, Role};
+use super::{ChatMessage, ChatResponse, EmbeddingProvider, Provider, Role, floor_char_boundary};
 
 pub struct OpenAiProvider {
     http: Client,
@@ -124,11 +124,7 @@ async fn map_status(resp: reqwest::Response) -> Result<reqwest::Response, LlmErr
         return Ok(resp);
     }
     let body = resp.text().await.unwrap_or_default();
-    let excerpt = if body.len() > 512 {
-        &body[..512]
-    } else {
-        &body
-    };
+    let excerpt = &body[..floor_char_boundary(&body, 512)];
     if status.is_server_error() || status == StatusCode::TOO_MANY_REQUESTS {
         Err(LlmError::Transient(format!("{}: {}", status, excerpt)))
     } else {
@@ -342,6 +338,23 @@ mod tests {
         // The embedding for input 0 must come first, regardless of response order.
         assert_eq!(out.embeddings[0].0, vec![0.1, 0.2, 0.3]);
         assert_eq!(out.embeddings[1].0, vec![0.4, 0.5, 0.6]);
+    }
+
+    #[tokio::test]
+    async fn long_multibyte_error_body_does_not_panic() {
+        let server = MockServer::start().await;
+        // 3-byte chars, longer than the 512-char excerpt: a byte slice at index 512
+        // would split a codepoint and panic. Char-based truncation must not.
+        let body = "界".repeat(600);
+        Mock::given(method("POST"))
+            .and(path("/embeddings"))
+            .respond_with(ResponseTemplate::new(500).set_body_string(body))
+            .mount(&server)
+            .await;
+
+        let p = OpenAiProvider::new_embedding(&config_for(&server)).unwrap();
+        let err = p.embed(&["a".to_string()]).await.unwrap_err();
+        assert!(matches!(err, LlmError::Transient(_)));
     }
 
     #[tokio::test]

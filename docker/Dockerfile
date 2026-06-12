@@ -32,4 +32,7 @@ ENV MEMORYHUB_HOME=/data
 EXPOSE 8000
 USER memoryhub
 
+# The binary binds localhost by default; inside a container it must listen on all
+# interfaces to be reachable. Override by passing your own args after the image name.
 ENTRYPOINT ["memoryhub"]
+CMD ["--host", "0.0.0.0"]

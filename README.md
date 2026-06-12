@@ -33,23 +33,43 @@ It's a single self-contained service.
 ## Quick start
 
 ```bash
-# Run the server (defaults: 0.0.0.0:8000, data under ~/.memoryhub)
-cargo run -p memoryhub -- --host 127.0.0.1 --port 8000
+# Run the server. Pass a bootstrap admin token.
+MEMORYHUB_ADMIN_TOKEN=mh_root_secret cargo run -p memoryhub
 
-# Write a memory
-curl -X POST http://127.0.0.1:8000/v1/memories/write \
+# Provision a user and mint a token. The bootstrap token is honored only until an
+# admin user exists, so use it to create users and their tokens first.
+curl -sX POST http://127.0.0.1:8000/v1/admin/users \
+  -H 'Authorization: Bearer mh_root_secret' \
   -H 'Content-Type: application/json' \
-  -d '{"username":"alice","agent_id":"a1","filename":"role.md","content":"# Role\nBackend engineer"}'
+  -d '{"username":"alice","role":"user"}'
+
+curl -sX POST http://127.0.0.1:8000/v1/admin/users/alice/tokens \
+  -H 'Authorization: Bearer mh_root_secret' \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"laptop"}'
+# => {"id":"...","token":"mh_..."}   the token is shown only once; copy it.
+
+# Every /v1 route except /v1/health requires the token.
+TOKEN=mh_...   # the token minted above
+
+# Write a memory (agent_id is a UUID)
+curl -sX POST http://127.0.0.1:8000/v1/memories/write \
+  -H "Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"agent_id":"550e8400-e29b-41d4-a716-446655440000","filename":"role.md","content":"# Role\nBackend engineer"}'
 
 # Search
-curl -X POST http://127.0.0.1:8000/v1/search \
+curl -sX POST http://127.0.0.1:8000/v1/memories/search \
+  -H "Authorization: Bearer $TOKEN" \
   -H 'Content-Type: application/json' \
-  -d '{"username":"alice","agent_id":"a1","query":"who works on the backend?"}'
+  -d '{"query":"who works on the backend?"}'
 ```
 
 Configuration is a `config.toml` under the data directory (chat/embedding
 provider, models, chunking, paths). The data directory is chosen by, in order:
-`--base-dir` > `$MEMORYHUB_HOME` > `~/.memoryhub`.
+`--base-dir` > `$MEMORYHUB_HOME` > `~/.memoryhub`. The bootstrap admin token may
+also be set as `admin_token` in the `[auth]` section instead of via
+`MEMORYHUB_ADMIN_TOKEN`.
 
 ## License
 

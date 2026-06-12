@@ -47,7 +47,7 @@ impl SynthesisTarget {
     pub fn label(&self) -> String {
         match self {
             SynthesisTarget::Agent { username, agent_id } => {
-                let short = &agent_id[..agent_id.len().min(4)];
+                let short: String = agent_id.chars().take(4).collect();
                 format!("syn-task-{}-{}", username, short)
             }
             SynthesisTarget::User { username } => format!("syn-task-{}", username),

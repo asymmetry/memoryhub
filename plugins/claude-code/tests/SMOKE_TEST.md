@@ -33,6 +33,6 @@ Manual checklist to verify the plugin works end-to-end in a real Claude Code ses
     -d '{"agent_id":"<your-agent-id>","project":"<project-hash>","filename":"memory/<file>.md"}'
   ```
 
-- [ ] Start a new Claude Code session. The **recall** hook runs automatically at SessionStart via `memoryhub-mcp recall --agent claude-code --scope user` and injects your latest synthesized summary as `additionalContext` (only once synthesis has run; the hook exits cleanly if no summary exists yet).
+- [ ] Start a new Claude Code session. The **recall** hook runs automatically at SessionStart via `memoryhub-mcp recall --agent claude-code --scope global` and injects your latest synthesized summary as `additionalContext` (only once synthesis has run; the hook exits cleanly if no summary exists yet).
 
 - [ ] Stop the server and start another session. Confirm the recall hook exits cleanly without crashing the session.

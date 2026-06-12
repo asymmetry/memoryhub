@@ -9,7 +9,8 @@
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
-use acktor::{Actor, Context, Handler};
+use acktor::{Actor, Context, Handler, utils::debug_trace};
+use ahash::HashMap;
 use chrono::Utc;
 use rusqlite::{Connection, params};
 
@@ -315,7 +316,11 @@ fn do_search(conn: &Connection, msg: &IndexSearch) -> Result<Vec<SearchResult>, 
          ORDER BY cv.distance ASC"
     );
 
-    let mut all_results: Vec<SearchResult> = Vec::new();
+    // A multi-embedding query (a long query split into chunks) runs one KNN per query
+    // embedding, so the same stored chunk can match several of them. Dedup by chunk_id,
+    // keeping the highest score, so one chunk can't occupy several result slots and crowd
+    // out distinct matches.
+    let mut best: HashMap<String, SearchResult> = HashMap::default();
     for emb in &msg.embeddings {
         let blob = vec_to_blob(&emb.0);
         let mut stmt = conn.prepare(&sql)?;
@@ -323,28 +328,42 @@ fn do_search(conn: &Connection, msg: &IndexSearch) -> Result<Vec<SearchResult>, 
             // A degenerate stored vector (e.g. all-zeros) has an undefined cosine distance,
             // which sqlite-vec returns as NULL. Drop such rows rather than failing the whole
             // search.
+            let chunk_id: String = row.get(0)?;
             let distance: Option<f32> = row.get(1)?;
             let path: String = row.get(2)?;
             let start_line = row.get(3)?;
             let end_line = row.get(4)?;
             let snippet: String = row.get(5)?;
-            Ok(distance.map(|distance| SearchResult {
-                path,
-                start_line,
-                end_line,
-                // Cosine distance is in [0, 2] (0 = identical direction); map to a [0, 1]
-                // similarity score where 1.0 is most similar.
-                score: 1.0 - distance / 2.0,
-                snippet,
+
+            Ok(distance.map(|distance| {
+                (
+                    chunk_id,
+                    SearchResult {
+                        path,
+                        start_line,
+                        end_line,
+                        // Cosine distance is in [0, 2] (0 = identical direction); map to a [0, 1]
+                        // similarity score where 1.0 is most similar.
+                        score: 1.0 - distance / 2.0,
+                        snippet,
+                    },
+                )
             }))
         })?;
+
         for row in rows {
-            if let Some(result) = row? {
-                all_results.push(result);
+            if let Some((chunk_id, result)) = row? {
+                match best.get(&chunk_id) {
+                    Some(existing) if existing.score >= result.score => {}
+                    _ => {
+                        best.insert(chunk_id, result);
+                    }
+                }
             }
         }
     }
 
+    let mut all_results: Vec<SearchResult> = best.into_values().collect();
     // `total_cmp` orders deterministically without panicking even on a NaN score.
     all_results.sort_by(|a, b| b.score.total_cmp(&a.score));
     all_results.truncate(msg.limit);
@@ -369,6 +388,8 @@ impl Handler<EnsureVecReady> for Indexer {
         msg: EnsureVecReady,
         _ctx: &mut Self::Context,
     ) -> Result<(), IndexError> {
+        debug_trace!("Handle command {:?}", msg);
+
         let conn = Arc::clone(&self.conn);
         tokio::task::spawn_blocking(move || {
             let conn = conn.lock().unwrap();
@@ -386,6 +407,8 @@ impl Handler<IndexInsert> for Indexer {
         msg: IndexInsert,
         _ctx: &mut Self::Context,
     ) -> Result<(), IndexError> {
+        debug_trace!("Handle command {:?}", msg);
+
         let conn = Arc::clone(&self.conn);
         tokio::task::spawn_blocking(move || {
             let conn = conn.lock().unwrap();
@@ -403,6 +426,8 @@ impl Handler<IndexDelete> for Indexer {
         msg: IndexDelete,
         _ctx: &mut Self::Context,
     ) -> Result<(), IndexError> {
+        debug_trace!("Handle command {:?}", msg);
+
         let conn = Arc::clone(&self.conn);
         tokio::task::spawn_blocking(move || {
             let conn = conn.lock().unwrap();
@@ -420,6 +445,8 @@ impl Handler<IndexSearch> for Indexer {
         msg: IndexSearch,
         _ctx: &mut Self::Context,
     ) -> Result<Vec<SearchResult>, IndexError> {
+        debug_trace!("Handle command {:?}", msg);
+
         let conn = Arc::clone(&self.conn);
         tokio::task::spawn_blocking(move || {
             let conn = conn.lock().unwrap();
@@ -690,6 +717,63 @@ mod tests {
             "orthogonal cosine score should be ~0.5, got {}",
             orth.score
         );
+    }
+
+    #[tokio::test]
+    async fn multi_embedding_search_deduplicates_chunks() {
+        // A query that splits into multiple embeddings runs one KNN each; the same chunk
+        // matching several of them must appear only once in the results.
+        let index = test_index();
+        let (addr, _handle) = index.start("index-test").unwrap();
+
+        addr.send(EnsureVecReady { dim: 2 })
+            .await
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap();
+
+        addr.send(IndexInsert {
+            path: "alice/agent1/only.md".to_string(),
+            source: "raw".to_string(),
+            size: 10,
+            model: "mock".to_string(),
+            chunks: vec![Chunk {
+                text: "the one chunk".to_string(),
+                start_line: 1,
+                end_line: 1,
+                embedding: Embedding(vec![1.0, 0.0]),
+            }],
+        })
+        .await
+        .unwrap()
+        .await
+        .unwrap()
+        .unwrap();
+
+        // Two query embeddings, both matching the single stored chunk.
+        let results = addr
+            .send(IndexSearch {
+                embeddings: vec![Embedding(vec![1.0, 0.0]), Embedding(vec![1.0, 0.0])],
+                username: "alice".to_string(),
+                agent_id: Uuid::parse_str("00000000-0000-0000-0000-000000000001").unwrap(),
+                scope: super::super::message::SearchScope::User,
+                raw_only: false,
+                limit: 10,
+            })
+            .await
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(
+            results.len(),
+            1,
+            "the same chunk matched by two query embeddings must be deduplicated, got {:?}",
+            results.iter().map(|r| &r.path).collect::<Vec<_>>()
+        );
+        assert_eq!(results[0].path, "alice/agent1/only.md");
     }
 
     #[tokio::test]

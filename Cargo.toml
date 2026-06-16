@@ -32,7 +32,7 @@ sqlite-vec = "0.1"
 thiserror = "2.0"
 tokio = "1.47"
 toml = "1.1"
-tower-http = "0.6"
+tower-http = "0.7"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = { version = "1.23", features = ["v4", "serde"] }

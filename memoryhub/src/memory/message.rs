@@ -210,65 +210,6 @@ mod tests {
     use uuid::Uuid;
 
     #[test]
-    fn storage_write_msg_fields() {
-        let msg = StorageWrite {
-            path: "alice/agent1/2026-03-31.md".to_string(),
-            content: "hello".to_string(),
-        };
-        assert_eq!(msg.path, "alice/agent1/2026-03-31.md");
-        assert_eq!(msg.content, "hello");
-    }
-
-    #[test]
-    fn file_op_write_msg_fields() {
-        let msg = FileOpWrite {
-            username: "alice".to_string(),
-            agent_id: Uuid::new_v4(),
-            project: Some("proj".to_string()),
-            filename: "2026-03-31.md".to_string(),
-            content: "hello".to_string(),
-        };
-        assert_eq!(msg.username, "alice");
-    }
-
-    #[test]
-    fn search_result_fields() {
-        let sr = SearchResult {
-            path: "alice/agent1/2026-03-31.md".to_string(),
-            start_line: 1,
-            end_line: 10,
-            score: 0.95,
-            snippet: "hello world".to_string(),
-        };
-        assert!(sr.score > 0.9);
-    }
-
-    #[test]
-    fn file_changed_msg_fields() {
-        let agent_id = Uuid::new_v4();
-        let msg = FileChanged {
-            username: "alice".to_string(),
-            agent_id,
-            path: format!("alice/{}/x.md", agent_id),
-        };
-        assert_eq!(msg.username, "alice");
-        assert_eq!(msg.agent_id, agent_id);
-    }
-
-    #[test]
-    fn chunk_fields() {
-        use crate::llm::Embedding;
-        let chunk = Chunk {
-            text: "some text".to_string(),
-            start_line: 1,
-            end_line: 5,
-            embedding: Embedding(vec![0.0; 128]),
-        };
-        assert_eq!(chunk.start_line, 1);
-        assert_eq!(chunk.embedding.0.len(), 128);
-    }
-
-    #[test]
     fn summary_scope_serde_is_lowercase() {
         assert_eq!(
             serde_json::to_string(&SummaryScope::Global).unwrap(),

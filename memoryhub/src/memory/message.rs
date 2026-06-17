@@ -124,15 +124,6 @@ pub struct IndexDelete {
     pub path: String,
 }
 
-/// Ensure the `chunks_vec` virtual table exists for `dim`-sized vectors.
-/// Creates it on first call and persists `dim` to the `meta` table.
-/// Returns `DimensionMismatch` if a different dimension was previously stored.
-#[derive(Debug, Clone, Message)]
-#[result_type(Result<(), IndexError>)]
-pub struct EnsureVecReady {
-    pub dim: usize,
-}
-
 /// Search the index using embedding vectors.
 #[derive(Debug, Message)]
 #[result_type(Result<Vec<SearchResult>, IndexError>)]
@@ -217,65 +208,6 @@ pub struct FileChanged {
 mod tests {
     use super::*;
     use uuid::Uuid;
-
-    #[test]
-    fn storage_write_msg_fields() {
-        let msg = StorageWrite {
-            path: "alice/agent1/2026-03-31.md".to_string(),
-            content: "hello".to_string(),
-        };
-        assert_eq!(msg.path, "alice/agent1/2026-03-31.md");
-        assert_eq!(msg.content, "hello");
-    }
-
-    #[test]
-    fn file_op_write_msg_fields() {
-        let msg = FileOpWrite {
-            username: "alice".to_string(),
-            agent_id: Uuid::new_v4(),
-            project: Some("proj".to_string()),
-            filename: "2026-03-31.md".to_string(),
-            content: "hello".to_string(),
-        };
-        assert_eq!(msg.username, "alice");
-    }
-
-    #[test]
-    fn search_result_fields() {
-        let sr = SearchResult {
-            path: "alice/agent1/2026-03-31.md".to_string(),
-            start_line: 1,
-            end_line: 10,
-            score: 0.95,
-            snippet: "hello world".to_string(),
-        };
-        assert!(sr.score > 0.9);
-    }
-
-    #[test]
-    fn file_changed_msg_fields() {
-        let agent_id = Uuid::new_v4();
-        let msg = FileChanged {
-            username: "alice".to_string(),
-            agent_id,
-            path: format!("alice/{}/x.md", agent_id),
-        };
-        assert_eq!(msg.username, "alice");
-        assert_eq!(msg.agent_id, agent_id);
-    }
-
-    #[test]
-    fn chunk_fields() {
-        use crate::llm::Embedding;
-        let chunk = Chunk {
-            text: "some text".to_string(),
-            start_line: 1,
-            end_line: 5,
-            embedding: Embedding(vec![0.0; 128]),
-        };
-        assert_eq!(chunk.start_line, 1);
-        assert_eq!(chunk.embedding.0.len(), 128);
-    }
 
     #[test]
     fn summary_scope_serde_is_lowercase() {

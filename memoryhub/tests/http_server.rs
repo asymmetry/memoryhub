@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use acktor::{Actor, Address, Signal};
 use axum::{
+    Router,
     body::{Body, to_bytes},
     http::{Request, StatusCode},
 };
@@ -41,6 +42,31 @@ async fn body_string(resp: axum::response::Response) -> (StatusCode, String) {
     let status = resp.status();
     let bytes = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
     (status, String::from_utf8(bytes.to_vec()).unwrap())
+}
+
+/// Sends a POST with a JSON body, optionally bearer-authenticated, and returns the
+/// response status and body text.
+async fn post(app: &Router, uri: &str, bearer: Option<&str>, body: &str) -> (StatusCode, String) {
+    let mut builder = Request::builder()
+        .method("POST")
+        .uri(uri)
+        .header("content-type", "application/json");
+    if let Some(token) = bearer {
+        builder = builder.header("authorization", format!("Bearer {}", token));
+    }
+    let req = builder.body(Body::from(body.to_string())).unwrap();
+    body_string(app.clone().oneshot(req).await.unwrap()).await
+}
+
+/// Sends a GET, optionally bearer-authenticated, and returns the response status and
+/// body text.
+async fn get(app: &Router, uri: &str, bearer: Option<&str>) -> (StatusCode, String) {
+    let mut builder = Request::builder().method("GET").uri(uri);
+    if let Some(token) = bearer {
+        builder = builder.header("authorization", format!("Bearer {}", token));
+    }
+    let req = builder.body(Body::empty()).unwrap();
+    body_string(app.clone().oneshot(req).await.unwrap()).await
 }
 
 /// Builds handler state with an in-memory auth store, a `user`-role account `alice`, and a
@@ -85,12 +111,7 @@ async fn health_returns_ok() {
     let (state, _token) = state_with_user(mm).await;
     let app = build_router(state);
 
-    let req = Request::builder()
-        .uri("/v1/health")
-        .body(Body::empty())
-        .unwrap();
-    let resp = app.oneshot(req).await.unwrap();
-    let (status, body) = body_string(resp).await;
+    let (status, body) = get(&app, "/v1/health", None).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body, r#"{"status":"ok"}"#);
 }
@@ -103,81 +124,34 @@ async fn write_then_read_then_delete_then_read_404() {
     let app = build_router(state);
 
     let agent_id = "550e8400-e29b-41d4-a716-446655440000";
-    let bearer = format!("Bearer {}", token);
+    let auth = Some(token.as_str());
+    let read_body = format!(r#"{{"agent_id":"{}","filename":"test.md"}}"#, agent_id);
 
     // Write.
-    let req = Request::builder()
-        .method("POST")
-        .uri("/v1/memories/write")
-        .header("content-type", "application/json")
-        .header("authorization", &bearer)
-        .body(Body::from(format!(
-            r#"{{
-                "agent_id":"{}",
-                "filename":"test.md",
-                "content":"hello"
-            }}"#,
+    let (status, body) = post(
+        &app,
+        "/v1/memories/write",
+        auth,
+        &format!(
+            r#"{{"agent_id":"{}","filename":"test.md","content":"hello"}}"#,
             agent_id
-        )))
-        .unwrap();
-    let resp = app.clone().oneshot(req).await.unwrap();
-    let (status, body) = body_string(resp).await;
+        ),
+    )
+    .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body, "{}");
 
     // Read.
-    let req = Request::builder()
-        .method("POST")
-        .uri("/v1/memories/read")
-        .header("content-type", "application/json")
-        .header("authorization", &bearer)
-        .body(Body::from(format!(
-            r#"{{
-                "agent_id":"{}",
-                "filename":"test.md"
-            }}"#,
-            agent_id
-        )))
-        .unwrap();
-    let resp = app.clone().oneshot(req).await.unwrap();
-    let (status, body) = body_string(resp).await;
+    let (status, body) = post(&app, "/v1/memories/read", auth, &read_body).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body, r#"{"content":"hello"}"#);
 
     // Delete.
-    let req = Request::builder()
-        .method("POST")
-        .uri("/v1/memories/delete")
-        .header("content-type", "application/json")
-        .header("authorization", &bearer)
-        .body(Body::from(format!(
-            r#"{{
-                "agent_id":"{}",
-                "filename":"test.md"
-            }}"#,
-            agent_id
-        )))
-        .unwrap();
-    let resp = app.clone().oneshot(req).await.unwrap();
-    let (status, _body) = body_string(resp).await;
+    let (status, _) = post(&app, "/v1/memories/delete", auth, &read_body).await;
     assert_eq!(status, StatusCode::OK);
 
     // Read after delete -> 404.
-    let req = Request::builder()
-        .method("POST")
-        .uri("/v1/memories/read")
-        .header("content-type", "application/json")
-        .header("authorization", &bearer)
-        .body(Body::from(format!(
-            r#"{{
-                "agent_id":"{}",
-                "filename":"test.md"
-            }}"#,
-            agent_id
-        )))
-        .unwrap();
-    let resp = app.oneshot(req).await.unwrap();
-    let (status, body) = body_string(resp).await;
+    let (status, body) = post(&app, "/v1/memories/read", auth, &read_body).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
     assert_eq!(body, r#"{"error":"not_found"}"#);
 }
@@ -190,40 +164,27 @@ async fn search_after_write_returns_results() {
     let app = build_router(state);
 
     let agent_id = "550e8400-e29b-41d4-a716-446655440000";
-    let bearer = format!("Bearer {}", token);
+    let auth = Some(token.as_str());
 
-    let req = Request::builder()
-        .method("POST")
-        .uri("/v1/memories/write")
-        .header("content-type", "application/json")
-        .header("authorization", &bearer)
-        .body(Body::from(format!(
-            r#"{{
-                "agent_id":"{}",
-                "filename":"notes.md",
-                "content":"Rust programming language is great"
-            }}"#,
+    let (status, _) = post(
+        &app,
+        "/v1/memories/write",
+        auth,
+        &format!(
+            r#"{{"agent_id":"{}","filename":"notes.md","content":"Rust programming language is great"}}"#,
             agent_id
-        )))
-        .unwrap();
-    let resp = app.clone().oneshot(req).await.unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
 
-    let req = Request::builder()
-        .method("POST")
-        .uri("/v1/memories/search")
-        .header("content-type", "application/json")
-        .header("authorization", &bearer)
-        .body(Body::from(format!(
-            r#"{{
-                "agent_id":"{}",
-                "query":"programming"
-            }}"#,
-            agent_id
-        )))
-        .unwrap();
-    let resp = app.oneshot(req).await.unwrap();
-    let (status, body) = body_string(resp).await;
+    let (status, body) = post(
+        &app,
+        "/v1/memories/search",
+        auth,
+        &format!(r#"{{"agent_id":"{}","query":"programming"}}"#, agent_id),
+    )
+    .await;
     assert_eq!(status, StatusCode::OK);
     assert!(body.contains(r#""results""#));
     assert!(body.contains("notes.md"));
@@ -237,15 +198,14 @@ async fn bad_json_returns_400() {
     let app = build_router(state);
 
     // Authenticated so the request passes the auth middleware and reaches JSON parsing.
-    let req = Request::builder()
-        .method("POST")
-        .uri("/v1/memories/write")
-        .header("content-type", "application/json")
-        .header("authorization", format!("Bearer {}", token))
-        .body(Body::from("{not valid json}"))
-        .unwrap();
-    let resp = app.oneshot(req).await.unwrap();
-    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let (status, _) = post(
+        &app,
+        "/v1/memories/write",
+        Some(token.as_str()),
+        "{not valid json}",
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
 }
 
 #[tokio::test]
@@ -255,16 +215,14 @@ async fn missing_token_is_401() {
     let (state, _token) = state_with_user(mm).await;
     let app = build_router(state);
 
-    let req = Request::builder()
-        .method("POST")
-        .uri("/v1/memories/read")
-        .header("content-type", "application/json")
-        .body(Body::from(
-            r#"{"agent_id":"550e8400-e29b-41d4-a716-446655440000","filename":"x.md"}"#,
-        ))
-        .unwrap();
-    let resp = app.oneshot(req).await.unwrap();
-    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    let (status, _) = post(
+        &app,
+        "/v1/memories/read",
+        None,
+        r#"{"agent_id":"550e8400-e29b-41d4-a716-446655440000","filename":"x.md"}"#,
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
 }
 
 #[tokio::test]
@@ -273,28 +231,26 @@ async fn admin_can_create_user_and_mint_token() {
     let mm = spawn_memory_manager(dir.path()).await;
     let store = Arc::new(AuthStore::open_in_memory(Some("mh_root".into())).unwrap());
     let app = build_router(HttpServerState::new(mm, store));
+    let root = Some("mh_root");
 
     // Create a user with the root token.
-    let req = Request::builder()
-        .method("POST")
-        .uri("/v1/admin/users")
-        .header("content-type", "application/json")
-        .header("authorization", "Bearer mh_root")
-        .body(Body::from(r#"{"username":"bob","role":"user"}"#))
-        .unwrap();
-    let resp = app.clone().oneshot(req).await.unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
+    let (status, _) = post(
+        &app,
+        "/v1/admin/users",
+        root,
+        r#"{"username":"bob","role":"user"}"#,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
 
     // Mint a token for that user.
-    let req = Request::builder()
-        .method("POST")
-        .uri("/v1/admin/users/bob/tokens")
-        .header("content-type", "application/json")
-        .header("authorization", "Bearer mh_root")
-        .body(Body::from(r#"{"name":"laptop"}"#))
-        .unwrap();
-    let resp = app.oneshot(req).await.unwrap();
-    let (status, body) = body_string(resp).await;
+    let (status, body) = post(
+        &app,
+        "/v1/admin/users/bob/tokens",
+        root,
+        r#"{"name":"laptop"}"#,
+    )
+    .await;
     assert_eq!(status, StatusCode::OK);
     assert!(body.contains(r#""token":"mh_"#));
 }
@@ -305,25 +261,19 @@ async fn root_token_stops_working_once_an_admin_is_created() {
     let mm = spawn_memory_manager(dir.path()).await;
     let store = Arc::new(AuthStore::open_in_memory(Some("mh_root".into())).unwrap());
     let app = build_router(HttpServerState::new(mm, store));
+    let root = Some("mh_root");
 
     // Bootstrap: the root token works while no admin exists.
-    let req = Request::builder()
-        .method("POST")
-        .uri("/v1/admin/users")
-        .header("content-type", "application/json")
-        .header("authorization", "Bearer mh_root")
-        .body(Body::from(r#"{"username":"boss","role":"admin"}"#))
-        .unwrap();
-    let resp = app.clone().oneshot(req).await.unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
+    let (status, _) = post(
+        &app,
+        "/v1/admin/users",
+        root,
+        r#"{"username":"boss","role":"admin"}"#,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
 
     // Now that an admin exists, the bootstrap-only root token is ignored.
-    let req = Request::builder()
-        .method("GET")
-        .uri("/v1/admin/users")
-        .header("authorization", "Bearer mh_root")
-        .body(Body::empty())
-        .unwrap();
-    let resp = app.oneshot(req).await.unwrap();
-    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    let (status, _) = get(&app, "/v1/admin/users", root).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
 }

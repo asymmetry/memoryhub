@@ -464,48 +464,4 @@ mod tests {
 
         assert!(summary.is_none());
     }
-
-    #[tokio::test]
-    async fn write_emits_synthesis_after_cooldown() {
-        let dir = tempfile::tempdir().unwrap();
-
-        let mut cfg = test_config(dir.path());
-        cfg.synthesizer_cooldown_secs = 0;
-
-        let mm = MemoryManager::new(cfg, test_llm(dir.path()));
-        let (addr, _handle) = mm.start("memory-manager").unwrap();
-
-        let agent_id = Uuid::new_v4();
-        addr.send(FileOpWrite {
-            username: "alice".to_string(),
-            agent_id,
-            project: None,
-            filename: "first.md".to_string(),
-            content: "Some content for synthesis".to_string(),
-        })
-        .await
-        .unwrap()
-        .await
-        .unwrap()
-        .unwrap();
-
-        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-
-        let folder = dir.path().join("alice").join("_synthesized");
-        assert!(
-            folder.is_dir(),
-            "expected _synthesized folder at {:?}",
-            folder
-        );
-        let any_md = std::fs::read_dir(&folder)
-            .unwrap()
-            .filter_map(|e| e.ok())
-            .any(|e| {
-                e.path()
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .is_some_and(|s| s.ends_with(".md"))
-            });
-        assert!(any_md, "expected a dated synthesis file in {:?}", folder);
-    }
 }

@@ -19,7 +19,7 @@ use super::chunking::chunk_text;
 use super::config::MemoryConfig;
 use super::error::MemoryError;
 use super::indexer::Indexer;
-use super::message::{Chunk, EnsureVecReady, FileChanged, IndexInsert, StorageRead, StorageWrite};
+use super::message::{Chunk, FileChanged, IndexInsert, StorageRead, StorageWrite};
 use super::path::{current_synthesis_path, get_latest_synthesis_file};
 use super::storage::Storage;
 use crate::llm::{Embed, EmbedResult, LlmService, SourceDoc, SynthesisTarget, Synthesize};
@@ -293,12 +293,20 @@ impl Synthesizer {
 
     /// Chunk, embed, and write a synthesized document to Storage and Indexer.
     async fn write_synthesis(&self, path: &str, content: &str) -> Result<(), MemoryError> {
-        self.storage_write(path, content).await?;
-
+        // Chunk first: an empty (or whitespace-only) synthesis yields no chunks. Skip
+        // the write entirely in that case so a degenerate LLM reply can't overwrite a
+        // previously-stored summary with empty content.
         let text_chunks = chunk_text(content, self.config.chunk_size, self.config.chunk_overlap);
         if text_chunks.is_empty() {
+            warn!(
+                "Synthesizer: skipping write of {} — synthesis produced empty content",
+                path
+            );
             return Ok(());
         }
+
+        self.storage_write(path, content).await?;
+
         let texts: Vec<String> = text_chunks.iter().map(|c| c.text.clone()).collect();
         let embed_result = self.embed(texts).await?;
         let chunks: Vec<Chunk> = text_chunks
@@ -369,11 +377,6 @@ impl Synthesizer {
         chunks: Vec<Chunk>,
         model: String,
     ) -> Result<(), MemoryError> {
-        if let Some(first) = chunks.first() {
-            let dim = first.embedding.0.len();
-            let fut = self.index.send(EnsureVecReady { dim }).await?;
-            fut.await??;
-        }
         let fut = self
             .index
             .send(IndexInsert {
@@ -434,7 +437,11 @@ mod tests {
 
     use super::*;
     use crate::llm::LlmService;
-    use crate::memory::{indexer::Indexer, message::StorageWrite, storage::Storage};
+    use crate::memory::{
+        indexer::Indexer,
+        message::{StorageRead, StorageWrite},
+        storage::Storage,
+    };
 
     async fn boot() -> (
         Address<Storage>,
@@ -508,5 +515,46 @@ mod tests {
                 .unwrap_or(false);
             assert!(has_md, "expected a synthesis file in {:?}", folder);
         }
+    }
+
+    #[tokio::test]
+    async fn empty_synthesis_does_not_clobber_prior_summary() {
+        let (storage, index, llm, dir, _handles) = boot().await;
+
+        let cfg = MemoryConfig {
+            memory_dir: dir.path().to_string_lossy().to_string(),
+            db_path: ":memory:".to_string(),
+            synthesizer_cooldown_secs: 0,
+            ..MemoryConfig::default()
+        };
+        let synth = Synthesizer::new(llm, storage.clone(), index, cfg);
+
+        let path = "alice/_synthesized/2026-01-01-01.md";
+        storage
+            .send(StorageWrite {
+                path: path.to_string(),
+                content: "PRIOR SUMMARY".to_string(),
+            })
+            .await
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap();
+
+        // A degenerate (empty or whitespace-only) synthesis must not overwrite the
+        // previously-stored summary.
+        synth.write_synthesis(path, "").await.unwrap();
+        synth.write_synthesis(path, "   \n  \n").await.unwrap();
+
+        let content = storage
+            .send(StorageRead {
+                path: path.to_string(),
+            })
+            .await
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(content, Some("PRIOR SUMMARY".to_string()));
     }
 }

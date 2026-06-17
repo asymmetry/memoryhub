@@ -15,9 +15,7 @@ use chrono::Utc;
 use rusqlite::{Connection, params};
 
 use super::error::IndexError;
-use super::message::{
-    EnsureVecReady, IndexDelete, IndexInsert, IndexSearch, SearchResult, SearchScope,
-};
+use super::message::{IndexDelete, IndexInsert, IndexSearch, SearchResult, SearchScope};
 
 /// The Indexer actor. Owns a shared SQLite connection.
 pub struct Indexer {
@@ -25,8 +23,7 @@ pub struct Indexer {
 }
 
 impl Indexer {
-    /// Opens an in-memory index. The vector table is created lazily on first insert via
-    /// [`EnsureVecReady`].
+    /// Opens an in-memory index. The vector table is created lazily on the first insert.
     pub fn open_in_memory() -> Result<Self, IndexError> {
         load_sqlite_vec();
         let conn = Connection::open_in_memory()?;
@@ -380,25 +377,6 @@ impl Actor for Indexer {
     type Error = IndexError;
 }
 
-impl Handler<EnsureVecReady> for Indexer {
-    type Result = Result<(), IndexError>;
-
-    async fn handle(
-        &mut self,
-        msg: EnsureVecReady,
-        _ctx: &mut Self::Context,
-    ) -> Result<(), IndexError> {
-        debug_trace!("Handle command {:?}", msg);
-
-        let conn = Arc::clone(&self.conn);
-        tokio::task::spawn_blocking(move || {
-            let conn = conn.lock().unwrap();
-            do_ensure_vec_ready(&conn, msg.dim)
-        })
-        .await?
-    }
-}
-
 impl Handler<IndexInsert> for Indexer {
     type Result = Result<(), IndexError>;
 
@@ -412,6 +390,12 @@ impl Handler<IndexInsert> for Indexer {
         let conn = Arc::clone(&self.conn);
         tokio::task::spawn_blocking(move || {
             let conn = conn.lock().unwrap();
+            // Ensure the vec table matches this insert's embedding dimension first, so
+            // callers don't have to ensure it separately. The dimension is derived from
+            // the chunks; an empty insert needs no vec table.
+            if let Some(first) = msg.chunks.first() {
+                do_ensure_vec_ready(&conn, first.embedding.0.len())?;
+            }
             do_insert(&conn, &msg)
         })
         .await?
@@ -460,7 +444,7 @@ impl Handler<IndexSearch> for Indexer {
 mod tests {
     use uuid::Uuid;
 
-    use super::super::message::{Chunk, EnsureVecReady, IndexDelete, IndexInsert, IndexSearch};
+    use super::super::message::{Chunk, IndexDelete, IndexInsert, IndexSearch};
     use super::*;
     use crate::llm::Embedding;
 
@@ -472,13 +456,6 @@ mod tests {
     async fn insert_and_search() {
         let index = test_index();
         let (addr, _handle) = index.start("index-test").unwrap();
-
-        addr.send(EnsureVecReady { dim: 128 })
-            .await
-            .unwrap()
-            .await
-            .unwrap()
-            .unwrap();
 
         addr.send(IndexInsert {
             path: "alice/agent1/daily_note/2026-03-31.md".to_string(),
@@ -523,13 +500,6 @@ mod tests {
         // single-char wildcard, so an unescaped `a_b/%` would also match `axb/...`.
         let index = test_index();
         let (addr, _handle) = index.start("index-test").unwrap();
-
-        addr.send(EnsureVecReady { dim: 4 })
-            .await
-            .unwrap()
-            .await
-            .unwrap()
-            .unwrap();
 
         for owner in ["a_b", "axb"] {
             addr.send(IndexInsert {
@@ -580,13 +550,6 @@ mod tests {
         // `limit` rows, the scope filter then leaves nothing even though in-scope matches exist.
         let index = test_index();
         let (addr, _handle) = index.start("index-test").unwrap();
-
-        addr.send(EnsureVecReady { dim: 2 })
-            .await
-            .unwrap()
-            .await
-            .unwrap()
-            .unwrap();
 
         // Three "other" chunks sit exactly on the query vector (closest of all).
         for i in 0..3 {
@@ -658,13 +621,6 @@ mod tests {
         let index = test_index();
         let (addr, _handle) = index.start("index-test").unwrap();
 
-        addr.send(EnsureVecReady { dim: 2 })
-            .await
-            .unwrap()
-            .await
-            .unwrap()
-            .unwrap();
-
         // One chunk points the same way as the query; one is orthogonal.
         for (name, emb) in [("same", vec![1.0, 0.0]), ("orth", vec![0.0, 1.0])] {
             addr.send(IndexInsert {
@@ -726,13 +682,6 @@ mod tests {
         let index = test_index();
         let (addr, _handle) = index.start("index-test").unwrap();
 
-        addr.send(EnsureVecReady { dim: 2 })
-            .await
-            .unwrap()
-            .await
-            .unwrap()
-            .unwrap();
-
         addr.send(IndexInsert {
             path: "alice/agent1/only.md".to_string(),
             source: "raw".to_string(),
@@ -782,13 +731,6 @@ mod tests {
         let index = test_index();
         let (addr, _handle) = index.start("index-test").unwrap();
 
-        addr.send(EnsureVecReady { dim: 2 })
-            .await
-            .unwrap()
-            .await
-            .unwrap()
-            .unwrap();
-
         for (name, emb) in [("good", vec![1.0, 0.0]), ("zero", vec![0.0, 0.0])] {
             addr.send(IndexInsert {
                 path: format!("alice/agent1/{name}.md"),
@@ -832,13 +774,6 @@ mod tests {
     async fn delete_removes_chunks() {
         let index = test_index();
         let (addr, _handle) = index.start("index-test").unwrap();
-
-        addr.send(EnsureVecReady { dim: 128 })
-            .await
-            .unwrap()
-            .await
-            .unwrap()
-            .unwrap();
 
         addr.send(IndexInsert {
             path: "alice/agent1/daily_note/temp.md".to_string(),
@@ -891,13 +826,6 @@ mod tests {
         let (addr, _handle) = index.start("index-test").unwrap();
 
         let path = "alice/agent1/daily_note/replace.md".to_string();
-
-        addr.send(EnsureVecReady { dim: 128 })
-            .await
-            .unwrap()
-            .await
-            .unwrap()
-            .unwrap();
 
         addr.send(IndexInsert {
             path: path.clone(),
@@ -972,12 +900,6 @@ mod tests {
     }
 
     async fn seed_two_users(addr: &acktor::Address<Indexer>) {
-        addr.send(EnsureVecReady { dim: 128 })
-            .await
-            .unwrap()
-            .await
-            .unwrap()
-            .unwrap();
         for (path, source) in [
             ("alice/agent1/proj/a.md", "raw"),
             ("alice/_synthesized/2026-05-20-01.md", "synthesized"),

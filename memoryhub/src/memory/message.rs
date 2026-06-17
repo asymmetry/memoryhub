@@ -124,15 +124,6 @@ pub struct IndexDelete {
     pub path: String,
 }
 
-/// Ensure the `chunks_vec` virtual table exists for `dim`-sized vectors.
-/// Creates it on first call and persists `dim` to the `meta` table.
-/// Returns `DimensionMismatch` if a different dimension was previously stored.
-#[derive(Debug, Clone, Message)]
-#[result_type(Result<(), IndexError>)]
-pub struct EnsureVecReady {
-    pub dim: usize,
-}
-
 /// Search the index using embedding vectors.
 #[derive(Debug, Message)]
 #[result_type(Result<Vec<SearchResult>, IndexError>)]

@@ -65,15 +65,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn empty_content_produces_no_chunks() {
-        let chunks = chunk_text("", 400, 80);
-        assert!(chunks.is_empty());
-    }
-
-    #[test]
-    fn whitespace_only_produces_no_chunks() {
-        let chunks = chunk_text("   \n\n  \n", 400, 80);
-        assert!(chunks.is_empty());
+    fn blank_content_produces_no_chunks() {
+        // Empty and whitespace-only inputs both hit the same guard.
+        for content in ["", "   \n\n  \n"] {
+            assert!(chunk_text(content, 400, 80).is_empty(), "{content:?}");
+        }
     }
 
     #[test]

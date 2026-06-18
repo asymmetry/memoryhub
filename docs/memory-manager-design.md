@@ -25,7 +25,7 @@ The three long-lived children are spawned on startup. Each incoming request spaw
 
 ## Pipelines
 
-**Write** — derive `rel_path`; write to Storage; chunk the content; `Embed` the chunks; `IndexInsert`. If indexing fails, delete the file from Storage (rollback) so disk and index never diverge. On success, notify the Synthesizer with `FileChanged` (fire-and-forget), then reply.
+**Write** — derive `rel_path`; chunk the content; `Embed` the chunks; `IndexInsert`; then write to Storage **last**. All the fallible work (chunk, embed, index) happens before anything touches disk, so a failure leaves nothing to undo and never overwrites existing content. If the final storage write fails, the index entry just made is deleted (rolling back the index, never stored content) so search can't point at a file that was never written. On success, notify the Synthesizer with `FileChanged` (fire-and-forget), then reply.
 
 **Read** — derive `rel_path`; read from Storage; reply with content or NotFound.
 

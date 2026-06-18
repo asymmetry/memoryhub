@@ -246,46 +246,33 @@ pub async fn get_summary(
 mod tests {
     use super::*;
 
+    // These cover only the `#[serde(default)]` contracts our handlers rely on; full request/
+    // response (de)serialization is exercised end-to-end in `tests/http_server.rs`.
+
     #[test]
-    fn write_request_deserializes() {
-        let json = r#"{
-            "agent_id": "550e8400-e29b-41d4-a716-446655440000",
-            "filename": "2026-05-13.md",
-            "content": "hello"
-        }"#;
-        let req: WriteRequest = serde_json::from_str(json).unwrap();
-        assert_eq!(req.filename, "2026-05-13.md");
-        assert_eq!(req.content, "hello");
+    fn write_request_project_is_optional() {
+        let without = r#"{"agent_id":"550e8400-e29b-41d4-a716-446655440000","filename":"x.md","content":"hi"}"#;
+        assert!(
+            serde_json::from_str::<WriteRequest>(without)
+                .unwrap()
+                .project
+                .is_none()
+        );
+
+        let with = r#"{"agent_id":"550e8400-e29b-41d4-a716-446655440000","project":"p","filename":"x.md","content":"hi"}"#;
+        assert_eq!(
+            serde_json::from_str::<WriteRequest>(with)
+                .unwrap()
+                .project
+                .as_deref(),
+            Some("p")
+        );
     }
 
     #[test]
-    fn write_request_without_project_defaults_none() {
-        let json = r#"{"agent_id":"550e8400-e29b-41d4-a716-446655440000","filename":"x.md","content":"hi"}"#;
-        let req: WriteRequest = serde_json::from_str(json).unwrap();
-        assert!(req.project.is_none());
-    }
-
-    #[test]
-    fn write_request_with_project() {
-        let json = r#"{"agent_id":"550e8400-e29b-41d4-a716-446655440000","project":"p","filename":"x.md","content":"hi"}"#;
-        let req: WriteRequest = serde_json::from_str(json).unwrap();
-        assert_eq!(req.project.as_deref(), Some("p"));
-    }
-
-    #[test]
-    fn read_request_deserializes() {
-        let json = r#"{
-            "agent_id": "550e8400-e29b-41d4-a716-446655440000",
-            "filename": "notes/MEMORY.md"
-        }"#;
-        let req: ReadRequest = serde_json::from_str(json).unwrap();
-        assert_eq!(req.filename, "notes/MEMORY.md");
-    }
-
-    #[test]
-    fn search_request_defaults_scope_all() {
-        let json = r#"{"query":"rust"}"#;
-        let req: SearchRequest = serde_json::from_str(json).unwrap();
+    fn search_request_applies_serde_defaults() {
+        // Only `query` is required; scope defaults to All, raw_only to false, agent_id to None.
+        let req: SearchRequest = serde_json::from_str(r#"{"query":"rust"}"#).unwrap();
         assert_eq!(req.query, "rust");
         assert_eq!(req.scope, SearchScope::All);
         assert!(!req.raw_only);
@@ -293,40 +280,13 @@ mod tests {
     }
 
     #[test]
-    fn search_request_parses_scope_and_raw_only() {
-        let json = r#"{"agent_id":"550e8400-e29b-41d4-a716-446655440000","query":"x","scope":"agent","raw_only":true}"#;
-        let req: SearchRequest = serde_json::from_str(json).unwrap();
-        assert_eq!(req.scope, SearchScope::Agent);
-        assert!(req.raw_only);
-    }
-
-    #[test]
-    fn read_response_serializes() {
-        let resp = ReadResponse {
-            content: "hi".to_string(),
-        };
-        let json = serde_json::to_string(&resp).unwrap();
-        assert_eq!(json, r#"{"content":"hi"}"#);
-    }
-
-    #[test]
-    fn health_response_serializes() {
-        let resp = HealthResponse { status: "ok" };
-        let json = serde_json::to_string(&resp).unwrap();
-        assert_eq!(json, r#"{"status":"ok"}"#);
-    }
-
-    #[test]
-    fn summary_request_deserializes_with_scope() {
-        let json = r#"{"agent_id":"550e8400-e29b-41d4-a716-446655440000","scope":"agent"}"#;
-        let req: SummaryRequest = serde_json::from_str(json).unwrap();
+    fn summary_request_agent_id_is_optional() {
+        let with = r#"{"agent_id":"550e8400-e29b-41d4-a716-446655440000","scope":"agent"}"#;
+        let req: SummaryRequest = serde_json::from_str(with).unwrap();
         assert!(matches!(req.scope, SummaryScope::Agent));
         assert!(req.agent_id.is_some());
-    }
 
-    #[test]
-    fn summary_request_allows_absent_agent_id() {
-        let req: SummaryRequest = serde_json::from_str(r#"{"scope":"user"}"#).unwrap();
-        assert!(req.agent_id.is_none());
+        let without: SummaryRequest = serde_json::from_str(r#"{"scope":"user"}"#).unwrap();
+        assert!(without.agent_id.is_none());
     }
 }

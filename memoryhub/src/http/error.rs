@@ -45,6 +45,9 @@ pub enum AuthError {
     #[error("user not found")]
     UserNotFound,
 
+    #[error("cannot delete the last admin user")]
+    LastAdmin,
+
     #[error("token not found")]
     TokenNotFound,
 
@@ -88,6 +91,7 @@ impl From<AuthError> for HttpError {
         match e {
             AuthError::InvalidUsername(msg) => HttpError::BadRequest(msg),
             AuthError::UserExists => HttpError::Conflict,
+            AuthError::LastAdmin => HttpError::BadRequest(e.to_string()),
             AuthError::UserNotFound | AuthError::TokenNotFound => HttpError::NotFound,
             AuthError::Db(_) | AuthError::Join(_) => HttpError::Internal(e.report()),
         }
@@ -143,89 +147,123 @@ mod tests {
 
     use super::*;
 
-    async fn body_string(resp: Response) -> (StatusCode, String) {
-        let status = resp.status();
+    /// Expectation for the response body's optional `message` field.
+    enum Msg<'a> {
+        /// `message` must be absent (the `skip_serializing_if` contract for message-less codes).
+        Absent,
+        /// `message` is present and contains this substring.
+        Has(&'a str),
+        /// `message` is present; its content is not checked.
+        Present,
+    }
+
+    async fn assert_response(err: HttpError, status: StatusCode, code: &str, msg: Msg<'_>) {
+        let resp = err.into_response();
+        assert_eq!(resp.status(), status, "status for {code}");
         let bytes = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
-        (status, String::from_utf8(bytes.to_vec()).unwrap())
+        let body = String::from_utf8(bytes.to_vec()).unwrap();
+        assert!(
+            body.contains(&format!(r#""error":"{code}""#)),
+            "code in {body}"
+        );
+        match msg {
+            Msg::Absent => assert!(!body.contains("message"), "unexpected message in {body}"),
+            Msg::Has(m) => assert!(body.contains(m), "expected {m:?} in {body}"),
+            Msg::Present => assert!(body.contains("message"), "expected a message in {body}"),
+        }
     }
 
     #[tokio::test]
-    async fn not_found_maps_to_404() {
-        let (status, body) = body_string(HttpError::NotFound.into_response()).await;
-        assert_eq!(status, StatusCode::NOT_FOUND);
-        assert_eq!(body, r#"{"error":"not_found"}"#);
+    async fn http_errors_map_to_status_and_body() {
+        use Msg::*;
+        assert_response(
+            HttpError::NotFound,
+            StatusCode::NOT_FOUND,
+            "not_found",
+            Absent,
+        )
+        .await;
+        assert_response(
+            HttpError::Unauthorized,
+            StatusCode::UNAUTHORIZED,
+            "unauthorized",
+            Absent,
+        )
+        .await;
+        assert_response(
+            HttpError::Forbidden,
+            StatusCode::FORBIDDEN,
+            "forbidden",
+            Absent,
+        )
+        .await;
+        assert_response(
+            HttpError::Conflict,
+            StatusCode::CONFLICT,
+            "conflict",
+            Absent,
+        )
+        .await;
+        assert_response(
+            HttpError::Unavailable("dead".into()),
+            StatusCode::SERVICE_UNAVAILABLE,
+            "unavailable",
+            Absent,
+        )
+        .await;
+        assert_response(
+            HttpError::Memory(MemoryError::SendError("boom".into())),
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "internal",
+            Has("boom"),
+        )
+        .await;
+        assert_response(
+            HttpError::Memory(MemoryError::InvalidProject("bad".into())),
+            StatusCode::BAD_REQUEST,
+            "bad_request",
+            Has("bad"),
+        )
+        .await;
     }
 
     #[tokio::test]
-    async fn unavailable_maps_to_503() {
-        let (status, body) =
-            body_string(HttpError::Unavailable("dead".to_string()).into_response()).await;
-        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
-        assert_eq!(body, r#"{"error":"unavailable"}"#);
-    }
-
-    #[tokio::test]
-    async fn memory_error_maps_to_500_with_message() {
-        let err = HttpError::Memory(MemoryError::SendError("boom".into()));
-        let (status, body) = body_string(err.into_response()).await;
-        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
-        assert!(body.contains(r#""error":"internal""#));
-        assert!(body.contains("boom"));
-    }
-
-    #[tokio::test]
-    async fn unauthorized_maps_to_401() {
-        let (status, body) = body_string(HttpError::Unauthorized.into_response()).await;
-        assert_eq!(status, StatusCode::UNAUTHORIZED);
-        assert_eq!(body, r#"{"error":"unauthorized"}"#);
-    }
-
-    #[tokio::test]
-    async fn forbidden_maps_to_403() {
-        let (status, body) = body_string(HttpError::Forbidden.into_response()).await;
-        assert_eq!(status, StatusCode::FORBIDDEN);
-        assert_eq!(body, r#"{"error":"forbidden"}"#);
-    }
-
-    #[tokio::test]
-    async fn auth_user_exists_maps_to_409() {
-        let err: HttpError = AuthError::UserExists.into();
-        let (status, body) = body_string(err.into_response()).await;
-        assert_eq!(status, StatusCode::CONFLICT);
-        assert_eq!(body, r#"{"error":"conflict"}"#);
-    }
-
-    #[tokio::test]
-    async fn auth_invalid_username_maps_to_400() {
-        let err: HttpError = AuthError::InvalidUsername("a/b".into()).into();
-        let (status, body) = body_string(err.into_response()).await;
-        assert_eq!(status, StatusCode::BAD_REQUEST);
-        assert!(body.contains(r#""error":"bad_request""#));
-        assert!(body.contains("a/b"));
-    }
-
-    #[tokio::test]
-    async fn auth_user_not_found_maps_to_404() {
-        let err: HttpError = AuthError::UserNotFound.into();
-        let (status, body) = body_string(err.into_response()).await;
-        assert_eq!(status, StatusCode::NOT_FOUND);
-        assert_eq!(body, r#"{"error":"not_found"}"#);
-    }
-
-    #[tokio::test]
-    async fn auth_db_error_maps_to_500() {
-        let err: HttpError = AuthError::Db(rusqlite::Error::QueryReturnedNoRows).into();
-        let (status, body) = body_string(err.into_response()).await;
-        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
-        assert!(body.contains(r#""error":"internal""#));
-    }
-
-    #[tokio::test]
-    async fn invalid_project_maps_to_400() {
-        let err = HttpError::Memory(MemoryError::InvalidProject("bad".into()));
-        let (status, body) = body_string(err.into_response()).await;
-        assert_eq!(status, StatusCode::BAD_REQUEST);
-        assert!(body.contains(r#""error":"bad_request""#));
-        assert!(body.contains("bad"));
+    async fn auth_errors_convert_to_http() {
+        use Msg::*;
+        assert_response(
+            AuthError::UserExists.into(),
+            StatusCode::CONFLICT,
+            "conflict",
+            Absent,
+        )
+        .await;
+        assert_response(
+            AuthError::InvalidUsername("a/b".into()).into(),
+            StatusCode::BAD_REQUEST,
+            "bad_request",
+            Has("a/b"),
+        )
+        .await;
+        assert_response(
+            AuthError::UserNotFound.into(),
+            StatusCode::NOT_FOUND,
+            "not_found",
+            Absent,
+        )
+        .await;
+        assert_response(
+            AuthError::LastAdmin.into(),
+            StatusCode::BAD_REQUEST,
+            "bad_request",
+            Has("last admin"),
+        )
+        .await;
+        assert_response(
+            AuthError::Db(rusqlite::Error::QueryReturnedNoRows).into(),
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "internal",
+            Present,
+        )
+        .await;
     }
 }

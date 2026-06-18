@@ -45,6 +45,9 @@ pub enum AuthError {
     #[error("user not found")]
     UserNotFound,
 
+    #[error("cannot delete the last admin user")]
+    LastAdmin,
+
     #[error("token not found")]
     TokenNotFound,
 
@@ -88,6 +91,7 @@ impl From<AuthError> for HttpError {
         match e {
             AuthError::InvalidUsername(msg) => HttpError::BadRequest(msg),
             AuthError::UserExists => HttpError::Conflict,
+            AuthError::LastAdmin => HttpError::BadRequest(e.to_string()),
             AuthError::UserNotFound | AuthError::TokenNotFound => HttpError::NotFound,
             AuthError::Db(_) | AuthError::Join(_) => HttpError::Internal(e.report()),
         }

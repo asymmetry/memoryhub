@@ -248,13 +248,33 @@ impl AuthStore {
         let username = username.to_string();
         tokio::task::spawn_blocking(move || {
             let conn = conn.lock().unwrap();
-            let affected =
-                conn.execute("DELETE FROM users WHERE username = ?1", params![username])?;
-            if affected == 0 {
-                Err(AuthError::UserNotFound)
-            } else {
-                Ok(())
+
+            // Look up the target's role first so we can both report a clean UserNotFound and
+            // refuse to remove the last remaining admin (which would lock everyone out of the
+            // admin API).
+            let role: Option<String> = conn
+                .query_row(
+                    "SELECT role FROM users WHERE username = ?1",
+                    params![username],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            let Some(role) = role else {
+                return Err(AuthError::UserNotFound);
+            };
+            if role == "admin" {
+                let admin_count: i64 = conn.query_row(
+                    "SELECT COUNT(*) FROM users WHERE role = 'admin'",
+                    [],
+                    |row| row.get(0),
+                )?;
+                if admin_count <= 1 {
+                    return Err(AuthError::LastAdmin);
+                }
             }
+
+            conn.execute("DELETE FROM users WHERE username = ?1", params![username])?;
+            Ok(())
         })
         .await?
     }
@@ -475,6 +495,29 @@ mod tests {
 
         let err = s.delete_user("alice").await.unwrap_err();
         assert!(matches!(err, AuthError::UserNotFound));
+    }
+
+    #[tokio::test]
+    async fn cannot_delete_last_admin() {
+        let s = store();
+        s.create_user("boss", "admin").await.unwrap();
+        // Deleting the only admin would lock everyone out of the admin API.
+        let err = s.delete_user("boss").await.unwrap_err();
+        assert!(matches!(err, AuthError::LastAdmin));
+        assert!(s.has_admin().await.unwrap(), "the admin must still exist");
+    }
+
+    #[tokio::test]
+    async fn can_delete_admin_when_another_admin_remains() {
+        let s = store();
+        s.create_user("boss", "admin").await.unwrap();
+        s.create_user("deputy", "admin").await.unwrap();
+        // One of two admins can be removed; the other still administers.
+        s.delete_user("boss").await.unwrap();
+        let users = s.list_users().await.unwrap();
+        assert_eq!(users.len(), 1);
+        assert_eq!(users[0].username, "deputy");
+        assert!(s.has_admin().await.unwrap());
     }
 
     #[tokio::test]

@@ -18,8 +18,11 @@ pub struct LlmConfig {
     pub model: String,
     /// Embedding model identifier.
     pub embedding_model: String,
-    /// Embedding vector dimension. `None` means auto-detect from the first
-    /// embedding response. Pin it for known models to avoid surprises.
+    /// Embedding vector dimension.
+    ///
+    /// `None` means auto-detect from the first embedding response. When set, it is both enforced
+    /// on every response and sent to the provider as the `dimensions` request parameter, so the
+    /// returned vectors actually match.
     #[serde(default)]
     pub embedding_dim: Option<usize>,
     /// Directory holding synthesis prompt templates.

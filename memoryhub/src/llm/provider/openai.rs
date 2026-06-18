@@ -18,19 +18,21 @@ pub struct OpenAiProvider {
     api_key: String,
     chat_model: String,
     embedding_model: String,
+    embedding_dim: Option<usize>,
 }
 
 impl OpenAiProvider {
-    /// Construct for the **chat** role: reads `api_key_env` and `base_url`.
-    /// Used when OpenAI is the chat provider, and when it serves both roles
-    /// (in which case it is treated as a chat provider).
+    /// Constructs a new `OpenAiProvider` for the **chat** role.
+    ///
+    /// Used when OpenAI is the chat provider, and when it serves both roles (in which case it is
+    /// treated as a chat provider).
     pub fn new_chat(config: &LlmConfig) -> Result<Self, LlmError> {
         Self::from_parts(config, &config.api_key_env, &config.base_url)
     }
 
-    /// Construct for the **embedding** role: reads `embedding_api_key_env` and
-    /// `embedding_base_url`. Used when OpenAI is the embedding provider while a
-    /// different vendor (e.g. DeepSeek) handles chat.
+    /// Constructs a new `OpenAiProvider` for the **embedding** role.
+    ///
+    /// Used when OpenAI is the embedding provider while a different vendor handles chat.
     pub fn new_embedding(config: &LlmConfig) -> Result<Self, LlmError> {
         Self::from_parts(
             config,
@@ -56,6 +58,7 @@ impl OpenAiProvider {
             api_key,
             chat_model: config.model.clone(),
             embedding_model: config.embedding_model.clone(),
+            embedding_dim: config.embedding_dim,
         })
     }
 }
@@ -64,6 +67,9 @@ impl OpenAiProvider {
 struct EmbedRequest<'a> {
     model: &'a str,
     input: &'a [String],
+    /// Omitted entirely when unset so the request matches OpenAI's default behavior.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    dimensions: Option<usize>,
 }
 
 #[derive(Deserialize)]
@@ -214,6 +220,7 @@ impl EmbeddingProvider for OpenAiProvider {
                 .json(&EmbedRequest {
                     model: &self.embedding_model,
                     input: texts,
+                    dimensions: self.embedding_dim,
                 })
                 .send()
                 .await
@@ -249,7 +256,7 @@ mod tests {
     use serde_json::json;
     use wiremock::{
         Mock, MockServer, ResponseTemplate,
-        matchers::{method, path},
+        matchers::{body_partial_json, method, path},
     };
 
     use super::*;
@@ -338,6 +345,42 @@ mod tests {
         // The embedding for input 0 must come first, regardless of response order.
         assert_eq!(out.embeddings[0].0, vec![0.1, 0.2, 0.3]);
         assert_eq!(out.embeddings[1].0, vec![0.4, 0.5, 0.6]);
+    }
+
+    #[tokio::test]
+    async fn embed_sends_pinned_dimensions() {
+        let server = MockServer::start().await;
+        // The mock matches only when the request body carries `dimensions: 3`, which
+        // `config_for` pins via `embedding_dim`. If `embed` doesn't forward it, no mock
+        // matches, the server 404s, and the call fails.
+        Mock::given(method("POST"))
+            .and(path("/embeddings"))
+            .and(body_partial_json(json!({ "dimensions": 3 })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "model": "text-embedding-3-small",
+                "data": [ { "index": 0, "embedding": [0.1, 0.2, 0.3] } ]
+            })))
+            .mount(&server)
+            .await;
+
+        let p = OpenAiProvider::new_embedding(&config_for(&server)).unwrap();
+        let out = p.embed(&["a".to_string()]).await.unwrap();
+        assert_eq!(out.embeddings[0].0, vec![0.1, 0.2, 0.3]);
+    }
+
+    #[test]
+    fn embed_request_omits_dimensions_when_unset() {
+        let input = vec!["a".to_string()];
+        let body = serde_json::to_value(EmbedRequest {
+            model: "text-embedding-3-small",
+            input: &input,
+            dimensions: None,
+        })
+        .unwrap();
+        assert!(
+            body.get("dimensions").is_none(),
+            "dimensions must be omitted when not pinned, got {body}"
+        );
     }
 
     #[tokio::test]

@@ -8,6 +8,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use rand::RngExt;
+use reqwest::StatusCode;
 use tokio::time;
 use tracing::warn;
 
@@ -156,10 +157,82 @@ pub(crate) fn floor_char_boundary(s: &str, index: usize) -> usize {
     boundary
 }
 
+/// Maps a non-success HTTP response to an `LlmError`, classifying 5xx and 429 as `Transient`
+/// (worth retrying) and everything else as `Provider`. The error body is truncated to a 512-char
+/// boundary so a huge or multibyte body can't bloat the message or panic on a non-boundary slice.
+///
+/// Shared by every HTTP provider; the OpenAI-compatible chat/embedding APIs use the same scheme.
+pub(crate) async fn map_status(resp: reqwest::Response) -> Result<reqwest::Response, LlmError> {
+    let status = resp.status();
+    if status.is_success() {
+        return Ok(resp);
+    }
+    let body = resp.text().await.unwrap_or_default();
+    let excerpt = &body[..floor_char_boundary(&body, 512)];
+    if status.is_server_error() || status == StatusCode::TOO_MANY_REQUESTS {
+        Err(LlmError::Transient(format!("{}: {}", status, excerpt)))
+    } else {
+        Err(LlmError::Provider(format!("{}: {}", status, excerpt)))
+    }
+}
+
+/// Classifies a reqwest transport error: timeouts and connection failures are `Transient`.
+pub(crate) fn map_reqwest(e: reqwest::Error) -> LlmError {
+    if e.is_timeout() || e.is_connect() {
+        LlmError::Transient(e.to_string())
+    } else {
+        LlmError::Provider(e.to_string())
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};
+
     use super::mock::MockProvider;
     use super::*;
+
+    /// Fetches a real `reqwest::Response` with the given status and body via a one-shot mock
+    /// server, so `map_status` can be exercised without a live provider.
+    async fn fetched(status: u16, body: &str) -> reqwest::Response {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(status).set_body_string(body))
+            .mount(&server)
+            .await;
+        reqwest::Client::new()
+            .get(server.uri())
+            .send()
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn map_status_classifies_by_code() {
+        // 2xx passes through; 5xx and 429 are transient (retried); other 4xx are permanent.
+        assert!(map_status(fetched(200, "ok").await).await.is_ok());
+        assert!(matches!(
+            map_status(fetched(429, "slow down").await).await,
+            Err(LlmError::Transient(_))
+        ));
+        assert!(matches!(
+            map_status(fetched(503, "down").await).await,
+            Err(LlmError::Transient(_))
+        ));
+        assert!(matches!(
+            map_status(fetched(400, "bad input").await).await,
+            Err(LlmError::Provider(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn map_status_truncates_long_multibyte_body_without_panicking() {
+        // 3-byte chars, longer than the 512-char excerpt: a byte slice at index 512 would split a
+        // codepoint and panic. Char-boundary truncation must not.
+        let body = "界".repeat(600);
+        let err = map_status(fetched(500, &body).await).await.unwrap_err();
+        assert!(matches!(err, LlmError::Transient(_)));
+    }
 
     #[tokio::test]
     async fn retry_succeeds_after_two_transient_errors() {

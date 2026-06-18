@@ -5,12 +5,12 @@ use std::pin::Pin;
 use std::time::Duration;
 
 use acktor::ErrorReport;
-use reqwest::{Client, StatusCode};
+use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use tracing::debug;
 
 use super::super::{config::LlmConfig, error::LlmError};
-use super::{ChatMessage, ChatResponse, Provider, Role, floor_char_boundary};
+use super::{ChatMessage, ChatResponse, Provider, Role, map_reqwest, map_status};
 
 pub struct DeepSeekProvider {
     http: Client,
@@ -77,28 +77,6 @@ fn role_str(r: Role) -> &'static str {
         Role::System => "system",
         Role::User => "user",
         Role::Assistant => "assistant",
-    }
-}
-
-async fn map_status(resp: reqwest::Response) -> Result<reqwest::Response, LlmError> {
-    let status = resp.status();
-    if status.is_success() {
-        return Ok(resp);
-    }
-    let body = resp.text().await.unwrap_or_default();
-    let excerpt = &body[..floor_char_boundary(&body, 512)];
-    if status.is_server_error() || status == StatusCode::TOO_MANY_REQUESTS {
-        Err(LlmError::Transient(format!("{}: {}", status, excerpt)))
-    } else {
-        Err(LlmError::Provider(format!("{}: {}", status, excerpt)))
-    }
-}
-
-fn map_reqwest(e: reqwest::Error) -> LlmError {
-    if e.is_timeout() || e.is_connect() {
-        LlmError::Transient(e.to_string())
-    } else {
-        LlmError::Provider(e.to_string())
     }
 }
 
@@ -206,69 +184,6 @@ mod tests {
 
         assert_eq!(out.model, "deepseek-v4-flash");
         assert_eq!(out.content, "hello back");
-    }
-
-    #[tokio::test]
-    async fn http_429_maps_to_transient() {
-        let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(path("/chat/completions"))
-            .respond_with(ResponseTemplate::new(429).set_body_string("slow down"))
-            .mount(&server)
-            .await;
-
-        let p = DeepSeekProvider::new(&config_for(&server)).unwrap();
-        let err = p
-            .chat(&[ChatMessage {
-                role: Role::User,
-                content: "hi".into(),
-            }])
-            .await
-            .unwrap_err();
-        assert!(matches!(err, LlmError::Transient(_)));
-    }
-
-    #[tokio::test]
-    async fn http_400_maps_to_provider() {
-        let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(path("/chat/completions"))
-            .respond_with(ResponseTemplate::new(400).set_body_string("bad input"))
-            .mount(&server)
-            .await;
-
-        let p = DeepSeekProvider::new(&config_for(&server)).unwrap();
-        let err = p
-            .chat(&[ChatMessage {
-                role: Role::User,
-                content: "hi".into(),
-            }])
-            .await
-            .unwrap_err();
-        assert!(matches!(err, LlmError::Provider(_)));
-    }
-
-    #[tokio::test]
-    async fn long_multibyte_error_body_does_not_panic() {
-        let server = MockServer::start().await;
-        // 3-byte chars, longer than the 512-char excerpt: a byte slice at index 512
-        // would split a codepoint and panic. Char-based truncation must not.
-        let body = "界".repeat(600);
-        Mock::given(method("POST"))
-            .and(path("/chat/completions"))
-            .respond_with(ResponseTemplate::new(500).set_body_string(body))
-            .mount(&server)
-            .await;
-
-        let p = DeepSeekProvider::new(&config_for(&server)).unwrap();
-        let err = p
-            .chat(&[ChatMessage {
-                role: Role::User,
-                content: "hi".into(),
-            }])
-            .await
-            .unwrap_err();
-        assert!(matches!(err, LlmError::Transient(_)));
     }
 
     #[tokio::test]

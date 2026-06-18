@@ -5,12 +5,14 @@ use std::pin::Pin;
 use std::time::Duration;
 
 use acktor::ErrorReport;
-use reqwest::{Client, StatusCode};
+use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use tracing::debug;
 
 use super::super::{EmbedResult, Embedding, config::LlmConfig, error::LlmError};
-use super::{ChatMessage, ChatResponse, EmbeddingProvider, Provider, Role, floor_char_boundary};
+use super::{
+    ChatMessage, ChatResponse, EmbeddingProvider, Provider, Role, map_reqwest, map_status,
+};
 
 pub struct OpenAiProvider {
     http: Client,
@@ -121,28 +123,6 @@ fn role_str(r: Role) -> &'static str {
         Role::System => "system",
         Role::User => "user",
         Role::Assistant => "assistant",
-    }
-}
-
-async fn map_status(resp: reqwest::Response) -> Result<reqwest::Response, LlmError> {
-    let status = resp.status();
-    if status.is_success() {
-        return Ok(resp);
-    }
-    let body = resp.text().await.unwrap_or_default();
-    let excerpt = &body[..floor_char_boundary(&body, 512)];
-    if status.is_server_error() || status == StatusCode::TOO_MANY_REQUESTS {
-        Err(LlmError::Transient(format!("{}: {}", status, excerpt)))
-    } else {
-        Err(LlmError::Provider(format!("{}: {}", status, excerpt)))
-    }
-}
-
-fn map_reqwest(e: reqwest::Error) -> LlmError {
-    if e.is_timeout() || e.is_connect() {
-        LlmError::Transient(e.to_string())
-    } else {
-        LlmError::Provider(e.to_string())
     }
 }
 
@@ -381,23 +361,6 @@ mod tests {
             body.get("dimensions").is_none(),
             "dimensions must be omitted when not pinned, got {body}"
         );
-    }
-
-    #[tokio::test]
-    async fn long_multibyte_error_body_does_not_panic() {
-        let server = MockServer::start().await;
-        // 3-byte chars, longer than the 512-char excerpt: a byte slice at index 512
-        // would split a codepoint and panic. Char-based truncation must not.
-        let body = "界".repeat(600);
-        Mock::given(method("POST"))
-            .and(path("/embeddings"))
-            .respond_with(ResponseTemplate::new(500).set_body_string(body))
-            .mount(&server)
-            .await;
-
-        let p = OpenAiProvider::new_embedding(&config_for(&server)).unwrap();
-        let err = p.embed(&["a".to_string()]).await.unwrap_err();
-        assert!(matches!(err, LlmError::Transient(_)));
     }
 
     #[tokio::test]

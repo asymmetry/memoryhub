@@ -190,7 +190,7 @@ impl McpServer {
         )
         .await
         {
-            Ok(text) => Ok(CallToolResult::success(vec![Content::text(text)])),
+            Ok(text) => Ok(CallToolResult::success(vec![ContentBlock::text(text)])),
             Err(e) => Err(McpError::internal_error(e.to_string(), None)),
         }
     }
@@ -215,7 +215,7 @@ impl McpServer {
         )
         .await
         {
-            Ok(text) => Ok(CallToolResult::success(vec![Content::text(text)])),
+            Ok(text) => Ok(CallToolResult::success(vec![ContentBlock::text(text)])),
             Err(e) => Err(McpError::internal_error(e.to_string(), None)),
         }
     }
@@ -240,7 +240,7 @@ impl McpServer {
         )
         .await
         {
-            Ok(text) => Ok(CallToolResult::success(vec![Content::text(text)])),
+            Ok(text) => Ok(CallToolResult::success(vec![ContentBlock::text(text)])),
             Err(e) => Err(McpError::internal_error(e.to_string(), None)),
         }
     }
@@ -263,7 +263,7 @@ impl McpServer {
         )
         .await
         {
-            Ok(text) => Ok(CallToolResult::success(vec![Content::text(text)])),
+            Ok(text) => Ok(CallToolResult::success(vec![ContentBlock::text(text)])),
             Err(e) => Err(McpError::internal_error(e.to_string(), None)),
         }
     }

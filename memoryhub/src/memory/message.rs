@@ -124,6 +124,12 @@ pub struct IndexDelete {
     pub path: String,
 }
 
+/// Query whether the index holds any chunks. Lets a search skip the (remote) embedding
+/// round-trip when there is nothing to search.
+#[derive(Debug, Clone, Message)]
+#[result_type(Result<bool, IndexError>)]
+pub struct IndexIsEmpty;
+
 /// Search the index using embedding vectors.
 #[derive(Debug, Message)]
 #[result_type(Result<Vec<SearchResult>, IndexError>)]

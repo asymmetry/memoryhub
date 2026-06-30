@@ -15,7 +15,9 @@ use chrono::Utc;
 use rusqlite::{Connection, params};
 
 use super::error::IndexError;
-use super::message::{IndexDelete, IndexInsert, IndexSearch, SearchResult, SearchScope};
+use super::message::{
+    IndexDelete, IndexInsert, IndexIsEmpty, IndexSearch, SearchResult, SearchScope,
+};
 
 /// The Indexer actor. Owns a shared SQLite connection.
 pub struct Indexer {
@@ -288,7 +290,30 @@ fn like_escape(s: &str) -> String {
 /// belong to other users.
 const SCOPE_OVERFETCH: usize = 10;
 
+/// Whether the index holds no chunks. `chunks` is the source of truth: it is non-empty exactly
+/// when a real insert has populated `chunks_vec`, so an empty `chunks` means a search has nothing
+/// to match.
+fn do_is_empty(conn: &Connection) -> Result<bool, IndexError> {
+    let has_any: bool =
+        conn.query_row("SELECT EXISTS(SELECT 1 FROM chunks)", [], |row| row.get(0))?;
+    Ok(!has_any)
+}
+
 fn do_search(conn: &Connection, msg: &IndexSearch) -> Result<Vec<SearchResult>, IndexError> {
+    // `chunks_vec` is created lazily on the first insert (or on reopen when a dimension is
+    // recorded in `meta`). A search issued before any write would otherwise fail with
+    // "no such table: chunks_vec"; an empty index simply has no matches.
+    let vec_table_exists = conn
+        .query_row(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'chunks_vec'",
+            [],
+            |_| Ok(()),
+        )
+        .is_ok();
+    if !vec_table_exists {
+        return Ok(Vec::new());
+    }
+
     let path_prefix = match msg.scope {
         SearchScope::All => "%".to_string(),
         SearchScope::User => format!("{}/%", like_escape(&msg.username)),
@@ -421,6 +446,25 @@ impl Handler<IndexDelete> for Indexer {
     }
 }
 
+impl Handler<IndexIsEmpty> for Indexer {
+    type Result = Result<bool, IndexError>;
+
+    async fn handle(
+        &mut self,
+        msg: IndexIsEmpty,
+        _ctx: &mut Self::Context,
+    ) -> Result<bool, IndexError> {
+        debug_trace!("Handle command {:?}", msg);
+
+        let conn = Arc::clone(&self.conn);
+        tokio::task::spawn_blocking(move || {
+            let conn = conn.lock().unwrap();
+            do_is_empty(&conn)
+        })
+        .await?
+    }
+}
+
 impl Handler<IndexSearch> for Indexer {
     type Result = Result<Vec<SearchResult>, IndexError>;
 
@@ -444,7 +488,7 @@ impl Handler<IndexSearch> for Indexer {
 mod tests {
     use uuid::Uuid;
 
-    use super::super::message::{Chunk, IndexDelete, IndexInsert, IndexSearch};
+    use super::super::message::{Chunk, IndexDelete, IndexInsert, IndexIsEmpty, IndexSearch};
     use super::*;
     use crate::llm::Embedding;
 
@@ -492,6 +536,82 @@ mod tests {
 
         assert!(!results.is_empty());
         assert_eq!(results[0].path, "alice/agent1/daily_note/2026-03-31.md");
+    }
+
+    #[tokio::test]
+    async fn search_on_empty_index_returns_no_results() {
+        // `chunks_vec` is created lazily on the first insert, so a search issued before any
+        // write must return an empty result set rather than erroring with
+        // "no such table: chunks_vec".
+        let index = test_index();
+        let (addr, _handle) = index.start("index-test").unwrap();
+
+        let results = addr
+            .send(IndexSearch {
+                embeddings: vec![Embedding(vec![1.0; 128])],
+                username: "alice".to_string(),
+                agent_id: Uuid::parse_str("00000000-0000-0000-0000-000000000001").unwrap(),
+                scope: super::super::message::SearchScope::User,
+                raw_only: false,
+                limit: 10,
+            })
+            .await
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert!(results.is_empty());
+    }
+
+    #[tokio::test]
+    async fn is_empty_is_true_on_fresh_index() {
+        let index = test_index();
+        let (addr, _handle) = index.start("index-test").unwrap();
+
+        let empty = addr
+            .send(IndexIsEmpty)
+            .await
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert!(empty);
+    }
+
+    #[tokio::test]
+    async fn is_empty_is_false_after_insert() {
+        let index = test_index();
+        let (addr, _handle) = index.start("index-test").unwrap();
+
+        addr.send(IndexInsert {
+            path: "alice/agent1/note.md".to_string(),
+            source: "raw".to_string(),
+            size: 10,
+            model: "mock".to_string(),
+            chunks: vec![Chunk {
+                text: "something".to_string(),
+                start_line: 1,
+                end_line: 1,
+                embedding: Embedding(vec![1.0; 4]),
+            }],
+        })
+        .await
+        .unwrap()
+        .await
+        .unwrap()
+        .unwrap();
+
+        let empty = addr
+            .send(IndexIsEmpty)
+            .await
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert!(!empty);
     }
 
     #[tokio::test]

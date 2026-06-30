@@ -57,6 +57,9 @@ struct SynthesisTaskTerminated {
 pub struct LlmService {
     config: LlmConfig,
     provider: Option<Arc<dyn Provider>>,
+    /// When set before `post_start` (via [`LlmService::with_providers`]), the embedding provider
+    /// is used as-is instead of being built from config. Lets tests inject an inspectable mock.
+    embedding_provider: Option<Arc<dyn EmbeddingProvider>>,
     embedder: Option<Address<Embedder>>,
     embedder_handle: Option<JoinHandle<()>>,
     tasks: HashMap<SynthesisTarget, Address<SynthesisTask>>,
@@ -68,6 +71,25 @@ impl LlmService {
         Self {
             config,
             provider: None,
+            embedding_provider: None,
+            embedder: None,
+            embedder_handle: None,
+            tasks: HashMap::default(),
+        }
+    }
+
+    /// Constructs an `LlmService` with explicit providers, bypassing config-based construction.
+    /// For tests that need to inspect or script provider calls.
+    #[cfg(test)]
+    pub fn with_providers(
+        config: LlmConfig,
+        chat: Arc<dyn Provider>,
+        embedding: Arc<dyn EmbeddingProvider>,
+    ) -> Self {
+        Self {
+            config,
+            provider: Some(chat),
+            embedding_provider: Some(embedding),
             embedder: None,
             embedder_handle: None,
             tasks: HashMap::default(),
@@ -86,8 +108,15 @@ impl Actor for LlmService {
     type Error = LlmError;
 
     async fn post_start(&mut self, _ctx: &mut Self::Context) -> Result<(), LlmError> {
-        let (chat, embedding) = build_providers(&self.config)?;
-        self.provider = Some(chat);
+        // Use injected providers if `with_providers` supplied them; otherwise build from config.
+        let embedding = match self.embedding_provider.take() {
+            Some(embedding) => embedding,
+            None => {
+                let (chat, embedding) = build_providers(&self.config)?;
+                self.provider = Some(chat);
+                embedding
+            }
+        };
 
         if let Err(e) = template::write_default_templates(&self.config.prompts_dir).await {
             warn!("Could not write default prompt templates: {}", e.report());

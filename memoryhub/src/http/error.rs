@@ -39,6 +39,9 @@ pub enum AuthError {
     #[error("invalid username: {0}")]
     InvalidUsername(String),
 
+    #[error("invalid role: {0}")]
+    InvalidRole(String),
+
     #[error("user already exists")]
     UserExists,
 
@@ -89,7 +92,9 @@ pub enum HttpError {
 impl From<AuthError> for HttpError {
     fn from(e: AuthError) -> Self {
         match e {
-            AuthError::InvalidUsername(msg) => HttpError::BadRequest(msg),
+            AuthError::InvalidUsername(msg) | AuthError::InvalidRole(msg) => {
+                HttpError::BadRequest(msg)
+            }
             AuthError::UserExists => HttpError::Conflict,
             AuthError::LastAdmin => HttpError::BadRequest(e.to_string()),
             AuthError::UserNotFound | AuthError::TokenNotFound => HttpError::NotFound,

@@ -30,9 +30,14 @@ def main() -> None:
             check=False,
             timeout=TIMEOUT,
         )
-        summary = result.stdout
     except (FileNotFoundError, subprocess.TimeoutExpired):
         return
+
+    # Fail open: on a non-zero exit (misconfig, auth rejected, partial output) inject nothing
+    # rather than feeding diagnostic/error text on stdout into the agent's context.
+    if result.returncode != 0:
+        return
+    summary = result.stdout
 
     out = format_context(summary)
     if out:

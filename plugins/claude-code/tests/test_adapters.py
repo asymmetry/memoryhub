@@ -99,6 +99,29 @@ def test_recall_passes_timeout_and_survives_timeout(monkeypatch, capsys):
     assert capsys.readouterr().out == ""  # fail-open: inject nothing
 
 
+def test_recall_ignores_output_on_nonzero_exit(monkeypatch, capsys):
+    # A non-fatal failure (auth rejected, misconfig) may still write diagnostic text to
+    # stdout; that error noise must not be injected into the agent's context.
+    monkeypatch.setattr(
+        recall.subprocess,
+        "run",
+        Mock(return_value=Mock(returncode=1, stdout="error: authentication failed")),
+    )
+    recall.main()
+    assert capsys.readouterr().out == ""  # fail-open: inject nothing on failure
+
+
+def test_recall_injects_output_on_success(monkeypatch, capsys):
+    monkeypatch.setattr(
+        recall.subprocess,
+        "run",
+        Mock(return_value=Mock(returncode=0, stdout="my digest")),
+    )
+    recall.main()
+    out = json.loads(capsys.readouterr().out)
+    assert out["hookSpecificOutput"]["additionalContext"] == "my digest"
+
+
 def test_capture_passes_timeout_and_survives_timeout(monkeypatch, capsys):
     mem = str(Path.home() / ".claude" / "projects" / "h" / "memory" / "a.md")
     payload = {"tool_calls": [{"tool_name": "Write", "tool_input": {"file_path": mem}}]}

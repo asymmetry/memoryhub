@@ -157,9 +157,28 @@ pub(crate) fn floor_char_boundary(s: &str, index: usize) -> usize {
     boundary
 }
 
+/// Maximum number of bytes read from an error response body before truncation. Bounds memory if a
+/// provider (or a hijacked endpoint) returns a huge error body; comfortably larger than the
+/// 512-char excerpt that [`map_status`] keeps.
+const MAX_ERROR_BODY_BYTES: usize = 8 * 1024;
+
+/// Reads at most `max_bytes` of a response body, draining no further, then lossily decodes to
+/// UTF-8 (so a binary or mid-codepoint-split error body can't panic). Used only on the error path.
+async fn read_body_capped(mut resp: reqwest::Response, max_bytes: usize) -> String {
+    let mut buf: Vec<u8> = Vec::new();
+    while buf.len() < max_bytes {
+        match resp.chunk().await {
+            Ok(Some(chunk)) => buf.extend_from_slice(&chunk),
+            // End of stream, or a read error on an already-failed response: use what we have.
+            Ok(None) | Err(_) => break,
+        }
+    }
+    buf.truncate(max_bytes);
+    String::from_utf8_lossy(&buf).into_owned()
+}
+
 /// Maps a non-success HTTP response to an `LlmError`, classifying 5xx and 429 as `Transient`
-/// (worth retrying) and everything else as `Provider`. The error body is truncated to a 512-char
-/// boundary so a huge or multibyte body can't bloat the message or panic on a non-boundary slice.
+/// (worth retrying) and everything else as `Provider`.
 ///
 /// Shared by every HTTP provider; the OpenAI-compatible chat/embedding APIs use the same scheme.
 pub(crate) async fn map_status(resp: reqwest::Response) -> Result<reqwest::Response, LlmError> {
@@ -167,7 +186,7 @@ pub(crate) async fn map_status(resp: reqwest::Response) -> Result<reqwest::Respo
     if status.is_success() {
         return Ok(resp);
     }
-    let body = resp.text().await.unwrap_or_default();
+    let body = read_body_capped(resp, MAX_ERROR_BODY_BYTES).await;
     let excerpt = &body[..floor_char_boundary(&body, 512)];
     if status.is_server_error() || status == StatusCode::TOO_MANY_REQUESTS {
         Err(LlmError::Transient(format!("{}: {}", status, excerpt)))
@@ -223,6 +242,25 @@ mod tests {
             map_status(fetched(400, "bad input").await).await,
             Err(LlmError::Provider(_))
         ));
+    }
+
+    #[tokio::test]
+    async fn read_body_capped_bounds_a_huge_body() {
+        // A multi-MB error body must not be read into memory in full.
+        let body = "a".repeat(1_000_000);
+        let read = read_body_capped(fetched(500, &body).await, MAX_ERROR_BODY_BYTES).await;
+        assert!(
+            read.len() <= MAX_ERROR_BODY_BYTES,
+            "read {} bytes, expected at most {}",
+            read.len(),
+            MAX_ERROR_BODY_BYTES
+        );
+    }
+
+    #[tokio::test]
+    async fn read_body_capped_returns_full_small_body() {
+        let read = read_body_capped(fetched(500, "short error").await, MAX_ERROR_BODY_BYTES).await;
+        assert_eq!(read, "short error");
     }
 
     #[tokio::test]

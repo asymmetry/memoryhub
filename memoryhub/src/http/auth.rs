@@ -125,6 +125,19 @@ fn validate_username(username: &str) -> Result<(), AuthError> {
     Ok(())
 }
 
+/// Rejects roles outside the `{user, admin}` allow-list, so a typo (e.g. `Admin`) can't silently
+/// create a non-privileged account an operator believes is an admin. The check is case-sensitive
+/// because [`AdminPrincipal`][super::middleware::AdminPrincipal] matches `role == "admin"` exactly.
+fn validate_role(role: &str) -> Result<(), AuthError> {
+    if matches!(role, "user" | "admin") {
+        Ok(())
+    } else {
+        Err(AuthError::InvalidRole(format!(
+            "{role:?} is not one of: user, admin"
+        )))
+    }
+}
+
 /// Generates a new token secret: `mh_` + base64url(32 random bytes, no padding).
 fn generate_secret() -> String {
     let bytes: [u8; 32] = rand::rng().random();
@@ -196,6 +209,7 @@ impl AuthStore {
 
     pub async fn create_user(&self, username: &str, role: &str) -> Result<UserInfo, AuthError> {
         validate_username(username)?;
+        validate_role(role)?;
         let conn = Arc::clone(&self.conn);
         let username = username.to_string();
         let role = role.to_string();
@@ -476,6 +490,27 @@ mod tests {
             let info = s.create_user(ok, "user").await.unwrap();
             assert_eq!(info.username, ok);
         }
+    }
+
+    #[tokio::test]
+    async fn create_user_rejects_unknown_roles() {
+        let s = store();
+        // Anything outside the {user, admin} allow-list must be rejected, so a typo like
+        // "Admin" can't silently create a non-privileged account an operator believes is admin.
+        for bad in ["Admin", "administrator", "superadmin", "", "USER", "root"] {
+            let err = s.create_user("alice", bad).await.unwrap_err();
+            assert!(
+                matches!(err, AuthError::InvalidRole(_)),
+                "expected InvalidRole for {bad:?}, got {err:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn create_user_accepts_known_roles() {
+        let s = store();
+        assert_eq!(s.create_user("alice", "user").await.unwrap().role, "user");
+        assert_eq!(s.create_user("bob", "admin").await.unwrap().role, "admin");
     }
 
     #[tokio::test]

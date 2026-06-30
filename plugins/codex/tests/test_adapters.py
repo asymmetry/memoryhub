@@ -1,6 +1,7 @@
 import sys
 import json
 from pathlib import Path
+from unittest.mock import Mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "hooks"))
 
@@ -57,6 +58,29 @@ def test_recall_passes_timeout_and_survives_timeout(monkeypatch, capsys):
     recall.main()  # a hung server must not raise or hang the session
     assert "timeout" in captured, "recall must bound subprocess.run with a timeout"
     assert capsys.readouterr().out == ""
+
+
+def test_recall_ignores_output_on_nonzero_exit(monkeypatch, capsys):
+    # A non-fatal failure (auth rejected, misconfig) may still write diagnostic text to
+    # stdout; that error noise must not be injected into the agent's context.
+    monkeypatch.setattr(
+        recall.subprocess,
+        "run",
+        Mock(return_value=Mock(returncode=1, stdout="error: authentication failed")),
+    )
+    recall.main()
+    assert capsys.readouterr().out == ""  # fail-open: inject nothing on failure
+
+
+def test_recall_injects_output_on_success(monkeypatch, capsys):
+    monkeypatch.setattr(
+        recall.subprocess,
+        "run",
+        Mock(return_value=Mock(returncode=0, stdout="my digest")),
+    )
+    recall.main()
+    out = json.loads(capsys.readouterr().out)
+    assert out["hookSpecificOutput"]["additionalContext"] == "my digest"
 
 
 def test_capture_passes_timeout_and_survives_timeout(monkeypatch, capsys, tmp_path):

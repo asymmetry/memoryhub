@@ -271,8 +271,8 @@ impl McpServer {
 
 #[tool_handler]
 impl ServerHandler for McpServer {
-    fn get_info(&self) -> ServerInfo {
-        let mut info = ServerInfo::default();
+    fn get_info(&self) -> ServerConfig {
+        let mut info = ServerConfig::default();
         info.instructions = Some(
             "MemoryHub gives you persistent memory across sessions. Call search_memory at the \
              start of a task to recall relevant context. Use write_memory to record durable \
